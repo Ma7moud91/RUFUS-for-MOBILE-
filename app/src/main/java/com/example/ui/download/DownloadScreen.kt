@@ -135,7 +135,7 @@ fun DownloadScreen(
             val item = uiState.downloadingItem!!
             Card(
                 shape = RoundedCornerShape(24.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.40f)),
                 border = CardDefaults.outlinedCardBorder().copy(
                     brush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.primary)
                 ),
@@ -180,12 +180,25 @@ fun DownloadScreen(
                             .clip(RoundedCornerShape(4.dp))
                     )
                     Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        "Source: ${item.officialSource}",
-                        fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.primary
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Speed: ${uiState.downloadSpeedFormatted}",
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Mirror: ${item.officialSource}",
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
         }
@@ -206,7 +219,7 @@ fun DownloadScreen(
             }
         }
 
-        // ISO Catalog List
+        // ISO Catalog List with Glass-Morphism Cards
         LazyColumn(
             modifier = Modifier.weight(1f),
             verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -216,11 +229,14 @@ fun DownloadScreen(
             items(filteredList, key = { it.id }) { item ->
                 Card(
                     shape = RoundedCornerShape(22.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)),
                     border = CardDefaults.outlinedCardBorder().copy(
-                        brush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.outline)
+                        brush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.primary.copy(alpha = 0.3f))
                     ),
-                    modifier = Modifier.fillMaxWidth()
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .bounceClick()
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Row(
@@ -248,7 +264,7 @@ fun DownloadScreen(
 
                             Surface(
                                 shape = RoundedCornerShape(8.dp),
-                                color = MaterialTheme.colorScheme.surface
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.8f)
                             ) {
                                 Text(
                                     text = item.approximateSize,
@@ -296,7 +312,7 @@ fun DownloadScreen(
                             // In-App Download / Start Download
                             Button(
                                 onClick = {
-                                    viewModel.startIsoDownload(item)
+                                    viewModel.startIsoDownload(item, context)
                                     Toast.makeText(context, "Initiating download for ${item.title}...", Toast.LENGTH_SHORT).show()
                                 },
                                 enabled = !uiState.isDownloadingIso,

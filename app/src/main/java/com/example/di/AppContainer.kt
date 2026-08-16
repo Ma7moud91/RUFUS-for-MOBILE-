@@ -13,6 +13,7 @@ interface AppContainer {
     val logRepository: LogRepository
     val usbRepository: UsbRepository
     val writeEngine: WriteEngine
+    val isoDownloadEngine: com.example.data.engine.IsoDownloadEngine
     val notificationManager: RufusNotificationManager
     val feedbackManager: com.example.util.RufusFeedbackManager
 }
@@ -28,6 +29,10 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
     
     override val writeEngine: WriteEngine by lazy {
         RealRufusWriteEngineImpl(context, logRepository, usbRepository)
+    }
+
+    override val isoDownloadEngine: com.example.data.engine.IsoDownloadEngine by lazy {
+        com.example.data.engine.IsoDownloadEngine(context)
     }
 
     override val notificationManager: RufusNotificationManager by lazy {

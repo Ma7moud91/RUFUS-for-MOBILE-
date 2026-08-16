@@ -29,6 +29,7 @@ class MainActivity : ComponentActivity() {
             usbRepository = appContainer.usbRepository,
             writeEngine = appContainer.writeEngine,
             logRepository = appContainer.logRepository,
+            isoDownloadEngine = appContainer.isoDownloadEngine,
             notificationManager = appContainer.notificationManager,
             feedbackManager = appContainer.feedbackManager
         )

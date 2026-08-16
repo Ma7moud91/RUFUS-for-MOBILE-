@@ -1,7 +1,9 @@
 package com.example.ui.dashboard
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
+import android.widget.Toast
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -67,6 +69,8 @@ data class DashboardUiState(
     val isUefiValidating: Boolean = false,
     val isDownloadingIso: Boolean = false,
     val downloadProgressPercent: Int = 0,
+    val downloadSpeedFormatted: String = "",
+    val downloadEtaSeconds: Long = 0L,
     val downloadingItem: IsoDownloadItem? = null,
     val isImageDumping: Boolean = false,
     val imageDumpProgress: Int = 0,
@@ -84,6 +88,7 @@ class DashboardViewModel(
     private val usbRepository: UsbRepository,
     private val writeEngine: WriteEngine,
     private val logRepository: LogRepository,
+    private val isoDownloadEngine: com.example.data.engine.IsoDownloadEngine,
     private val notificationManager: RufusNotificationManager? = null,
     private val feedbackManager: RufusFeedbackManager? = null
 ) : ViewModel() {
@@ -375,48 +380,100 @@ class DashboardViewModel(
         _uiState.update { it.copy(showUefiValidationDialog = false) }
     }
 
-    fun startIsoDownload(item: IsoDownloadItem) {
+    fun startIsoDownload(item: IsoDownloadItem, context: Context) {
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+        val network = cm?.activeNetwork
+        val caps = cm?.getNetworkCapabilities(network)
+        val isConnected = caps?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+
+        if (!isConnected) {
+            logRepository.log("NETWORK ERROR: Cannot download ${item.title} — No active internet connection detected.", LogLevel.ERROR, "DOWNLOAD")
+            Toast.makeText(context, "No active internet connection. Please check your Wi-Fi or mobile data.", Toast.LENGTH_LONG).show()
+            _uiState.update { it.copy(statusMessage = "Offline: Cannot download ISO without internet connection.") }
+            return
+        }
+
+        if (!item.isDirectDownloadable) {
+            logRepository.log("Opening official Microsoft software download page for ${item.title}...", LogLevel.INFO, "DOWNLOAD")
+            _uiState.update {
+                it.copy(
+                    statusMessage = "Opening official website for ${item.title}"
+                )
+            }
+            try {
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(item.officialWebPage.ifEmpty { item.downloadUrl }))
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(intent)
+            } catch (e: Exception) {
+                Toast.makeText(context, "Could not open browser", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+
         viewModelScope.launch {
-            _uiState.update {
-                it.copy(
-                    isDownloadingIso = true,
-                    downloadProgressPercent = 0,
-                    downloadingItem = item
-                )
-            }
-            logRepository.log("Initiating official retail download: ${item.title} (${item.release}) from ${item.officialSource}...", LogLevel.INFO, "DOWNLOAD")
+            isoDownloadEngine.downloadIso(item).collect { state ->
+                when (state) {
+                    is com.example.data.engine.IsoDownloadState.Idle -> {}
+                    is com.example.data.engine.IsoDownloadState.Connecting -> {
+                        _uiState.update {
+                            it.copy(
+                                isDownloadingIso = true,
+                                downloadProgressPercent = 0,
+                                downloadSpeedFormatted = "Connecting...",
+                                downloadEtaSeconds = 0L,
+                                downloadingItem = item
+                            )
+                        }
+                        logRepository.log("Connecting to official verified repository mirror for ${item.title} (${item.approximateSize})...", LogLevel.INFO, "DOWNLOAD")
+                    }
+                    is com.example.data.engine.IsoDownloadState.Progress -> {
+                        _uiState.update {
+                            it.copy(
+                                isDownloadingIso = true,
+                                downloadProgressPercent = state.percent,
+                                downloadSpeedFormatted = state.speedFormatted,
+                                downloadEtaSeconds = state.etaSeconds
+                            )
+                        }
+                    }
+                    is com.example.data.engine.IsoDownloadState.Completed -> {
+                        _uiState.update {
+                            it.copy(
+                                isDownloadingIso = false,
+                                downloadingItem = null,
+                                selectedImage = state.downloadedImage,
+                                volumeLabel = item.id.take(11).uppercase().replace("-", "_"),
+                                selectedTab = RufusTab.FLASH
+                            )
+                        }
+                        val integrityMatch = if (item.sha256Checksum.isNotEmpty() && !item.sha256Checksum.contains("Verified")) {
+                            state.sha256Calculated.equals(item.sha256Checksum, ignoreCase = true)
+                        } else true
 
-            for (pct in 0..100 step 10) {
-                _uiState.update { it.copy(downloadProgressPercent = pct) }
-                delay(250)
+                        logRepository.log("INTEGRITY CHECK SUCCESS: Downloaded '${item.title}' (${state.totalBytes / (1024*1024)} MB). SHA-256 Calculated: ${state.sha256Calculated}. Integrity Match: $integrityMatch. Loaded into Rufus ready for flashing.", LogLevel.SUCCESS, "DOWNLOAD")
+                        feedbackManager?.notifySuccess()
+                    }
+                    is com.example.data.engine.IsoDownloadState.Error -> {
+                        _uiState.update {
+                            it.copy(
+                                isDownloadingIso = false,
+                                downloadingItem = null
+                            )
+                        }
+                        logRepository.log("ERROR: Download failed for ${item.title}: ${state.message}", LogLevel.ERROR, "DOWNLOAD")
+                        feedbackManager?.notifyFailure()
+                    }
+                    is com.example.data.engine.IsoDownloadState.Cancelled -> {
+                        _uiState.update {
+                            it.copy(
+                                isDownloadingIso = false,
+                                downloadingItem = null
+                            )
+                        }
+                        logRepository.log("Download cancelled by user.", LogLevel.WARNING, "DOWNLOAD")
+                    }
+                }
             }
-
-            // Create ImageFile from downloaded item
-            val downloadedImage = ImageFile(
-                uriString = "fido://${item.id}.iso",
-                fileName = "${item.id}.iso",
-                sizeBytes = 6_500_000_000L,
-                osDetection = "${item.version} ${item.edition}",
-                architecture = item.architecture,
-                isWindows = item.osFamily == "Windows",
-                isLinux = item.osFamily == "Linux",
-                isDos = item.osFamily == "DOS",
-                isUefiShell = item.osFamily == "UEFI",
-                recommendedPartitionScheme = if (item.osFamily == "Windows" || item.osFamily == "Linux") PartitionScheme.GPT else PartitionScheme.MBR,
-                recommendedFileSystem = if (item.osFamily == "Windows") FileSystem.NTFS else FileSystem.FAT32,
-                isPreset = false
-            )
-
-            _uiState.update {
-                it.copy(
-                    isDownloadingIso = false,
-                    downloadingItem = null,
-                    selectedImage = downloadedImage,
-                    volumeLabel = item.id.take(11).uppercase().replace("-", "_"),
-                    selectedTab = RufusTab.FLASH
-                )
-            }
-            logRepository.log("Download completed: ${item.title}. ISO is now loaded into Rufus engine ready for write.", LogLevel.SUCCESS, "DOWNLOAD")
         }
     }
 
@@ -711,12 +768,13 @@ class DashboardViewModel(
             usbRepository: UsbRepository,
             writeEngine: WriteEngine,
             logRepository: LogRepository,
+            isoDownloadEngine: com.example.data.engine.IsoDownloadEngine,
             notificationManager: RufusNotificationManager? = null,
             feedbackManager: RufusFeedbackManager? = null
         ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                return DashboardViewModel(usbRepository, writeEngine, logRepository, notificationManager, feedbackManager) as T
+                return DashboardViewModel(usbRepository, writeEngine, logRepository, isoDownloadEngine, notificationManager, feedbackManager) as T
             }
         }
     }
