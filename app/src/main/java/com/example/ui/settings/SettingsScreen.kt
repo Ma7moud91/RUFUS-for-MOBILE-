@@ -1,8 +1,11 @@
 package com.example.ui.settings
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -13,12 +16,14 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.domain.models.FileSystem
 import com.example.domain.models.PartitionScheme
 import com.example.ui.dashboard.DashboardViewModel
+import com.example.ui.theme.AccentPresets
 
 @Composable
 fun SettingsScreen(
@@ -99,6 +104,40 @@ fun SettingsScreen(
                         checked = uiState.isDarkMode,
                         onCheckedChange = { viewModel.toggleDarkMode(it) }
                     )
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+                Divider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Text("Accent Color Override", fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                Text("Select a custom primary accent color that persists across sessions regardless of system wallpaper.", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(modifier = Modifier.height(10.dp))
+
+                @OptIn(ExperimentalLayoutApi::class)
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    AccentPresets.forEach { preset ->
+                        val isSelected = uiState.accentColorOverride == preset.value
+                        FilterChip(
+                            selected = isSelected,
+                            onClick = { viewModel.setAccentColorOverride(preset.value) },
+                            label = { Text(preset.name, fontSize = 11.sp) },
+                            leadingIcon = {
+                                Box(
+                                    modifier = Modifier
+                                        .size(14.dp)
+                                        .clip(CircleShape)
+                                        .background(preset.color)
+                                        .border(1.dp, MaterialTheme.colorScheme.outline, CircleShape)
+                                )
+                            },
+                            shape = RoundedCornerShape(12.dp)
+                        )
+                    }
                 }
             }
         }

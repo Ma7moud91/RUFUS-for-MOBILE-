@@ -31,6 +31,7 @@ enum class RufusTab(val title: String) {
     SETTINGS("Settings")
 }
 
+@androidx.compose.runtime.Immutable
 data class DashboardUiState(
     val selectedTab: RufusTab = RufusTab.FLASH,
     val selectedDevice: UsbDeviceDomainModel? = null,
@@ -77,6 +78,7 @@ data class DashboardUiState(
     val isBenchmarkRunning: Boolean = false,
     val lastBenchmark: FlowBenchmarkResult? = null,
     val isDarkMode: Boolean = false,
+    val accentColorOverride: Long? = null,
     val showInvalidFileDialog: Boolean = false,
     val invalidFileError: String = "",
     val statusMessage: String = "Ready",
@@ -578,6 +580,11 @@ class DashboardViewModel(
 
     fun toggleDarkMode(enabled: Boolean) {
         _uiState.update { it.copy(isDarkMode = enabled) }
+    }
+
+    fun setAccentColorOverride(colorLong: Long?) {
+        _uiState.update { it.copy(accentColorOverride = colorLong) }
+        logRepository.log("Accent color override set to ${colorLong?.let { "0x" + it.toString(16) } ?: "Default"}.", LogLevel.INFO, "CONFIG")
     }
 
     fun runDeviceBenchmark() {

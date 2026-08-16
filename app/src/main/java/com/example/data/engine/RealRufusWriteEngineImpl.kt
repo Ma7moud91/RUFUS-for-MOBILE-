@@ -8,6 +8,7 @@ import com.example.domain.models.*
 import com.example.domain.repository.LogRepository
 import com.example.domain.repository.UsbRepository
 import com.example.domain.repository.WriteEngine
+import com.example.service.RufusFlashingService
 import com.example.usb.filesystem.Fat32Formatter
 import com.example.usb.partition.GptGenerator
 import com.example.usb.partition.MbrGenerator
@@ -34,50 +35,102 @@ class RealRufusWriteEngineImpl(
         isCancelled.set(false)
         val startTime = System.currentTimeMillis()
 
-        logRepository.log("==================== RUFUS BOOTABLE ENGINE v4.5 ====================", LogLevel.INFO, "RUFUS")
-        logRepository.log("Target Storage Device: ${config.usbDeviceName} [HARDWARE OTG]", LogLevel.INFO, "WRITE")
-        logRepository.log("Boot Selection: ${config.bootSelectionType.label}", LogLevel.INFO, "WRITE")
-        logRepository.log("Partition Scheme: ${config.partitionScheme.label} | Target System: ${config.targetSystem.label}", LogLevel.INFO, "WRITE")
-        logRepository.log("File System: ${config.fileSystem.label} | Cluster Size: ${config.clusterSize} bytes", LogLevel.INFO, "WRITE")
-        logRepository.log("Volume Label: '${config.volumeLabel}' | Quick Format: ${config.quickFormat}", LogLevel.INFO, "WRITE")
+        RufusFlashingService.start(context, "Flashing ${config.usbDeviceName} (${config.volumeLabel})")
 
-        // Real physical hardware OTG device mode
-        val usbManager = context.getSystemService(Context.USB_SERVICE) as? UsbManager
-        if (usbManager == null) {
-            logRepository.log("FATAL: Android USB Host Manager service unavailable.", LogLevel.ERROR, "HARDWARE")
-            emit(WriteProgress.Error("USB Host system service unavailable on this device."))
-            return@flow
+        try {
+            logRepository.log("==================== RUFUS BOOTABLE ENGINE v4.5 ====================", LogLevel.INFO, "RUFUS")
+            logRepository.log("Target Storage Device: ${config.usbDeviceName} [HARDWARE OTG]", LogLevel.INFO, "WRITE")
+            logRepository.log("Boot Selection: ${config.bootSelectionType.label}", LogLevel.INFO, "WRITE")
+            logRepository.log("Partition Scheme: ${config.partitionScheme.label} | Target System: ${config.targetSystem.label}", LogLevel.INFO, "WRITE")
+            logRepository.log("File System: ${config.fileSystem.label} | Cluster Size: ${config.clusterSize} bytes", LogLevel.INFO, "WRITE")
+            logRepository.log("Volume Label: '${config.volumeLabel}' | Quick Format: ${config.quickFormat}", LogLevel.INFO, "WRITE")
+
+            // Real physical hardware OTG device mode
+            val usbManager = context.getSystemService(Context.USB_SERVICE) as? UsbManager
+            if (usbManager == null) {
+                logRepository.log("FATAL: Android USB Host Manager service unavailable.", LogLevel.ERROR, "HARDWARE")
+                emit(WriteProgress.Error("USB Host system service unavailable on this device."))
+                return@flow
+            }
+
+            val deviceList = usbManager.deviceList ?: emptyMap()
+            val physicalDevice = deviceList.values.find { dev ->
+                dev.deviceName == config.rawDevicePath ||
+                dev.deviceName == config.usbDeviceName ||
+                dev.productName == config.usbDeviceName
+            } ?: deviceList.values.firstOrNull()
+
+            if (physicalDevice == null) {
+                logRepository.log("ERROR: Target USB OTG drive '${config.usbDeviceName}' was disconnected or not found.", LogLevel.ERROR, "HARDWARE")
+                emit(WriteProgress.Error("USB Drive '${config.usbDeviceName}' not detected. Please reconnect physical OTG drive."))
+                return@flow
+            }
+
+            if (!usbManager.hasPermission(physicalDevice)) {
+                logRepository.log("ERROR: USB permission denied for ${physicalDevice.deviceName}. Requesting authorization...", LogLevel.ERROR, "HARDWARE")
+                usbRepository.requestPermission(physicalDevice.deviceName)
+                emit(WriteProgress.Error("USB Host permission required. Please tap 'OK/Allow' on the system USB prompt."))
+                return@flow
+            }
+
+            logRepository.log("Connected to physical USB Host device: ${physicalDevice.deviceName} (Vendor: 0x${String.format("%04X", physicalDevice.vendorId)}, Product: 0x${String.format("%04X", physicalDevice.productId)})", LogLevel.INFO, "HARDWARE")
+            performRealHardwareWrite(
+                usbManager = usbManager,
+                usbDevice = physicalDevice,
+                config = config,
+                startTime = startTime
+            ) { progress ->
+                emit(progress)
+            }
+        } finally {
+            RufusFlashingService.stop(context)
         }
+    }
 
-        val deviceList = usbManager.deviceList ?: emptyMap()
-        val physicalDevice = deviceList.values.find { dev ->
-            dev.deviceName == config.rawDevicePath ||
-            dev.deviceName == config.usbDeviceName ||
-            dev.productName == config.usbDeviceName
-        } ?: deviceList.values.firstOrNull()
-
-        if (physicalDevice == null) {
-            logRepository.log("ERROR: Target USB OTG drive '${config.usbDeviceName}' was disconnected or not found.", LogLevel.ERROR, "HARDWARE")
-            emit(WriteProgress.Error("USB Drive '${config.usbDeviceName}' not detected. Please reconnect physical OTG drive."))
-            return@flow
+    private suspend fun writeSectorsWithRetry(driver: UsbMassStorageDriver, lba: Long, data: ByteArray, emitProgress: (suspend (WriteProgress) -> Unit)? = null): Boolean {
+        var success = false
+        var attempts = 0
+        while (!success && attempts < 3 && !isCancelled.get()) {
+            attempts++
+            try {
+                success = withContext(Dispatchers.IO) {
+                    driver.writeSectors(lba, data)
+                }
+            } catch (e: Exception) {
+                logRepository.log("OTG Disconnection detected at LBA $lba (attempt $attempts): ${e.message}. Re-establishing SCSI bulk session...", LogLevel.WARNING, "OTG")
+                emitProgress?.invoke(WriteProgress.Analyzing("Resuming USB OTG session... (Attempt $attempts)"))
+                try {
+                    withContext(Dispatchers.IO) { driver.open() }
+                } catch (ex: Exception) {}
+            }
+            if (!success && attempts < 3) {
+                delay(200)
+            }
         }
+        return success
+    }
 
-        if (!usbManager.hasPermission(physicalDevice)) {
-            logRepository.log("ERROR: USB permission denied for ${physicalDevice.deviceName}. Requesting authorization...", LogLevel.ERROR, "HARDWARE")
-            usbRepository.requestPermission(physicalDevice.deviceName)
-            emit(WriteProgress.Error("USB Host permission required. Please tap 'OK/Allow' on the system USB prompt."))
-            return@flow
+    private suspend fun readSectorsWithRetry(driver: UsbMassStorageDriver, lba: Long, count: Int, emitProgress: (suspend (WriteProgress) -> Unit)? = null): ByteArray? {
+        var result: ByteArray? = null
+        var attempts = 0
+        while (result == null && attempts < 3 && !isCancelled.get()) {
+            attempts++
+            try {
+                result = withContext(Dispatchers.IO) {
+                    driver.readSectors(lba, count)
+                }
+            } catch (e: Exception) {
+                logRepository.log("OTG Read Disconnection at LBA $lba (attempt $attempts): ${e.message}. Resuming session...", LogLevel.WARNING, "OTG")
+                emitProgress?.invoke(WriteProgress.Analyzing("Resuming USB OTG read session... (Attempt $attempts)"))
+                try {
+                    withContext(Dispatchers.IO) { driver.open() }
+                } catch (ex: Exception) {}
+            }
+            if (result == null && attempts < 3) {
+                delay(150)
+            }
         }
-
-        logRepository.log("Connected to physical USB Host device: ${physicalDevice.deviceName} (Vendor: 0x${String.format("%04X", physicalDevice.vendorId)}, Product: 0x${String.format("%04X", physicalDevice.productId)})", LogLevel.INFO, "HARDWARE")
-        performRealHardwareWrite(
-            usbManager = usbManager,
-            usbDevice = physicalDevice,
-            config = config,
-            startTime = startTime
-        ) { progress ->
-            emit(progress)
-        }
+        return result
     }
 
     private suspend fun performRealHardwareWrite(
@@ -121,9 +174,7 @@ class RealRufusWriteEngineImpl(
             emitProgress(WriteProgress.Partitioning(20, "Zeroing initial partition sectors..."))
 
             val zeroSector = ByteArray(driver.sectorSize)
-            withContext(Dispatchers.IO) {
-                driver.writeSectors(0, zeroSector)
-            }
+            writeSectorsWithRetry(driver, 0, zeroSector, emitProgress)
 
             if (config.partitionScheme == PartitionScheme.GPT) {
                 val pmbr = MbrGenerator.createProtectiveMbr(driver.totalSectors)
@@ -133,11 +184,9 @@ class RealRufusWriteEngineImpl(
                     isEfiEsp = (config.bootSelectionType == BootSelectionType.UEFI_SHELL)
                 )
 
-                val gptWritten = withContext(Dispatchers.IO) {
-                    driver.writeSectors(0, pmbr) &&
-                    driver.writeSectors(1, gptHeader) &&
-                    driver.writeSectors(2, gptEntries)
-                }
+                val gptWritten = writeSectorsWithRetry(driver, 0, pmbr, emitProgress) &&
+                                 writeSectorsWithRetry(driver, 1, gptHeader, emitProgress) &&
+                                 writeSectorsWithRetry(driver, 2, gptEntries, emitProgress)
 
                 if (!gptWritten) {
                     logRepository.log("Failed to write GPT partition headers to physical flash media.", LogLevel.ERROR, "PARTITION")
@@ -150,9 +199,7 @@ class RealRufusWriteEngineImpl(
                     partitionType = if (config.fileSystem == FileSystem.FAT32) MbrGenerator.PARTITION_TYPE_FAT32_LBA else MbrGenerator.PARTITION_TYPE_NTFS_EXFAT,
                     totalSectors = driver.totalSectors
                 )
-                val mbrWritten = withContext(Dispatchers.IO) {
-                    driver.writeSectors(0, mbr)
-                }
+                val mbrWritten = writeSectorsWithRetry(driver, 0, mbr, emitProgress)
                 if (!mbrWritten) {
                     logRepository.log("Failed to write Standard MBR to physical flash media.", LogLevel.ERROR, "PARTITION")
                     emitProgress(WriteProgress.Error("Hardware MBR write failed at LBA 0"))
@@ -171,10 +218,8 @@ class RealRufusWriteEngineImpl(
                     totalPartitionSectors = (driver.totalSectors - 2048).coerceAtLeast(1024L),
                     volumeLabel = config.volumeLabel
                 )
-                val fmtWritten = withContext(Dispatchers.IO) {
-                    driver.writeSectors(2048, vbr) &&
-                    driver.writeSectors(2049, fsInfo)
-                }
+                val fmtWritten = writeSectorsWithRetry(driver, 2048, vbr, emitProgress) &&
+                                 writeSectorsWithRetry(driver, 2049, fsInfo, emitProgress)
                 if (!fmtWritten) {
                     logRepository.log("Warning: VBR write reported retry, verifying partition integrity...", LogLevel.WARNING, "FORMAT")
                 } else {
@@ -229,12 +274,10 @@ class RealRufusWriteEngineImpl(
                 val writeData = if (chunkLen == buffer.size) buffer else buffer.copyOf(chunkLen)
                 sourceSha256Digest.update(writeData)
 
-                val writtenOk = withContext(Dispatchers.IO) {
-                    driver.writeSectors(currentLba, writeData)
-                }
+                val writtenOk = writeSectorsWithRetry(driver, currentLba, writeData, emitProgress)
 
                 if (!writtenOk) {
-                    logRepository.log("SCSI write retry at LBA $currentLba...", LogLevel.WARNING, "SCSI")
+                    logRepository.log("SCSI write retry warning at LBA $currentLba...", LogLevel.WARNING, "SCSI")
                 }
 
                 val sectorsAdvanced = (chunkLen / driver.sectorSize).coerceAtLeast(1)
@@ -320,9 +363,7 @@ class RealRufusWriteEngineImpl(
 
                 while (sectorsReadBack < totalVerifySectors && !isCancelled.get()) {
                     val sectorsToRead = Math.min(totalVerifySectors - sectorsReadBack, chunkSectors.toLong()).toInt()
-                    val readBuffer = withContext(Dispatchers.IO) {
-                        driver.readSectors(verifyLba, sectorsToRead)
-                    }
+                    val readBuffer = readSectorsWithRetry(driver, verifyLba, sectorsToRead, emitProgress)
 
                     if (readBuffer != null) {
                         val validLen = if (sectorsReadBack + sectorsToRead >= totalVerifySectors) {

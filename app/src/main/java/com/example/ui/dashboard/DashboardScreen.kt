@@ -903,9 +903,6 @@ fun FlashTabContent(
     onCancelClick: () -> Unit
 ) {
     val scrollState = rememberScrollState()
-    val isWriting = uiState.writeProgress !is WriteProgress.Idle &&
-                    uiState.writeProgress !is WriteProgress.Completed &&
-                    uiState.writeProgress !is WriteProgress.Error
 
     val isWindows = uiState.selectedImage?.isWindows == true || uiState.bootSelectionType == BootSelectionType.WINDOWS_TO_GO
     val isLinux = uiState.selectedImage?.isLinux == true
@@ -1022,9 +1019,35 @@ fun FlashTabContent(
             onVerifyWrittenDataToggle = onVerifyWrittenDataToggle
         )
 
+        // Isolated Active Flashing Progress & Action Section (optimized to skip static form recompositions)
+        ActiveFlashingProgressSection(
+            writeProgress = uiState.writeProgress,
+            canStart = uiState.selectedDevice != null && (uiState.bootSelectionType != BootSelectionType.ISO_IMAGE || uiState.selectedImage != null),
+            onStartClick = onStartClick,
+            onCancelClick = onCancelClick,
+            strings = uiState.strings
+        )
+
+        Spacer(modifier = Modifier.height(88.dp))
+    }
+}
+
+@Composable
+fun ActiveFlashingProgressSection(
+    writeProgress: WriteProgress,
+    canStart: Boolean,
+    onStartClick: () -> Unit,
+    onCancelClick: () -> Unit,
+    strings: AppTranslations
+) {
+    val isWriting = writeProgress !is WriteProgress.Idle &&
+                    writeProgress !is WriteProgress.Completed &&
+                    writeProgress !is WriteProgress.Error
+
+    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         // Live Circular & Status Progress Gauge Card
         CircularAndLiveStatusCard(
-            progress = uiState.writeProgress
+            progress = writeProgress
         )
 
         Spacer(modifier = Modifier.height(4.dp))
@@ -1032,16 +1055,14 @@ fun FlashTabContent(
         // Action Buttons
         ActionButtonsRow(
             isWriting = isWriting,
-            isCompleted = uiState.writeProgress is WriteProgress.Completed,
-            canStart = uiState.selectedDevice != null && (uiState.bootSelectionType != BootSelectionType.ISO_IMAGE || uiState.selectedImage != null),
+            isCompleted = writeProgress is WriteProgress.Completed,
+            canStart = canStart,
             onStartClick = onStartClick,
             onCancelClick = onCancelClick,
-            startButtonText = uiState.strings.startButton,
-            flashingButtonText = uiState.strings.flashingButton,
-            startAgainButtonText = uiState.strings.startAgainButton
+            startButtonText = strings.startButton,
+            flashingButtonText = strings.flashingButton,
+            startAgainButtonText = strings.startAgainButton
         )
-
-        Spacer(modifier = Modifier.height(88.dp))
     }
 }
 

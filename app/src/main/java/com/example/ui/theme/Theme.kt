@@ -107,19 +107,46 @@ private fun ColorScheme.animateColors(): ColorScheme {
     )
 }
 
+data class AccentPreset(
+    val name: String,
+    val color: Color,
+    val value: Long?
+)
+
+val AccentPresets = listOf(
+    AccentPreset("Default", RufusPrimary, null),
+    AccentPreset("Classic Blue", Color(0xFF0061A4), 0xFF0061A4),
+    AccentPreset("Rufus Orange", Color(0xFFE35205), 0xFFE35205),
+    AccentPreset("Emerald Green", Color(0xFF006D3A), 0xFF006D3A),
+    AccentPreset("Royal Purple", Color(0xFF6750A4), 0xFF6750A4),
+    AccentPreset("Neon Teal", Color(0xFF006B6B), 0xFF006B6B),
+    AccentPreset("Crimson Red", Color(0xFFBA1A1A), 0xFFBA1A1A)
+)
+
 @Composable
 fun MyApplicationTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     dynamicColor: Boolean = false,
+    accentColorOverride: Color? = null,
     content: @Composable () -> Unit
 ) {
-    val targetColorScheme = when {
+    val baseScheme = when {
         dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
             val context = LocalContext.current
             if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
         }
         darkTheme -> DarkColorScheme
         else -> LightColorScheme
+    }
+
+    val targetColorScheme = if (accentColorOverride != null) {
+        baseScheme.copy(
+            primary = accentColorOverride,
+            primaryContainer = accentColorOverride.copy(alpha = 0.25f),
+            onPrimaryContainer = accentColorOverride
+        )
+    } else {
+        baseScheme
     }
 
     val animatedColorScheme = targetColorScheme.animateColors()

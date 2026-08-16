@@ -86,7 +86,10 @@ class MainActivity : ComponentActivity() {
         setContent {
             val uiState by dashboardViewModel.uiState.collectAsState()
 
-            MyApplicationTheme(darkTheme = uiState.isDarkMode) {
+            MyApplicationTheme(
+                darkTheme = uiState.isDarkMode,
+                accentColorOverride = uiState.accentColorOverride?.let { androidx.compose.ui.graphics.Color(it) }
+            ) {
                 DashboardScreen(
                     viewModel = dashboardViewModel,
                     onSelectImageClick = {
