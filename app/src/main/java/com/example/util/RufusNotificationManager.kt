@@ -69,10 +69,15 @@ class RufusNotificationManager(private val context: Context) {
 
         when (progress) {
             is WriteProgress.Writing -> {
+                val formattedRemaining = if (progress.remainingTimeSec >= 60) {
+                    "${progress.remainingTimeSec / 60}m ${progress.remainingTimeSec % 60}s"
+                } else {
+                    "${progress.remainingTimeSec}s"
+                }
                 val notification = NotificationCompat.Builder(context, CHANNEL_ID_PROGRESS)
                     .setSmallIcon(android.R.drawable.stat_sys_download)
                     .setContentTitle("Flashing to $deviceName: ${progress.percentage}%")
-                    .setContentText("${String.format("%.1f", progress.speedMbPerSec)} MB/s • ${progress.remainingTimeSec}s remaining")
+                    .setContentText("${String.format("%.1f", progress.speedMbPerSec)} MB/s • $formattedRemaining remaining")
                     .setSubText(progress.currentFile)
                     .setProgress(100, progress.percentage, false)
                     .setOngoing(true)

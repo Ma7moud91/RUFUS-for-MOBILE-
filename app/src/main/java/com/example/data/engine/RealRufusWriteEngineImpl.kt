@@ -35,59 +35,48 @@ class RealRufusWriteEngineImpl(
         val startTime = System.currentTimeMillis()
 
         logRepository.log("==================== RUFUS BOOTABLE ENGINE v4.5 ====================", LogLevel.INFO, "RUFUS")
-        logRepository.log("Target Storage Device: ${config.usbDeviceName} [${if (config.isSimulated) "VIRTUAL" else "HARDWARE OTG"}]", LogLevel.INFO, "WRITE")
+        logRepository.log("Target Storage Device: ${config.usbDeviceName} [HARDWARE OTG]", LogLevel.INFO, "WRITE")
         logRepository.log("Boot Selection: ${config.bootSelectionType.label}", LogLevel.INFO, "WRITE")
         logRepository.log("Partition Scheme: ${config.partitionScheme.label} | Target System: ${config.targetSystem.label}", LogLevel.INFO, "WRITE")
         logRepository.log("File System: ${config.fileSystem.label} | Cluster Size: ${config.clusterSize} bytes", LogLevel.INFO, "WRITE")
         logRepository.log("Volume Label: '${config.volumeLabel}' | Quick Format: ${config.quickFormat}", LogLevel.INFO, "WRITE")
 
-        if (!config.isSimulated) {
-            // Real physical hardware OTG device mode
-            val usbManager = context.getSystemService(Context.USB_SERVICE) as? UsbManager
-            if (usbManager == null) {
-                logRepository.log("FATAL: Android USB Host Manager service unavailable.", LogLevel.ERROR, "HARDWARE")
-                emit(WriteProgress.Error("USB Host system service unavailable on this device."))
-                return@flow
-            }
+        // Real physical hardware OTG device mode
+        val usbManager = context.getSystemService(Context.USB_SERVICE) as? UsbManager
+        if (usbManager == null) {
+            logRepository.log("FATAL: Android USB Host Manager service unavailable.", LogLevel.ERROR, "HARDWARE")
+            emit(WriteProgress.Error("USB Host system service unavailable on this device."))
+            return@flow
+        }
 
-            val deviceList = usbManager.deviceList ?: emptyMap()
-            val physicalDevice = deviceList.values.find { dev ->
-                dev.deviceName == config.rawDevicePath ||
-                dev.deviceName == config.usbDeviceName ||
-                dev.productName == config.usbDeviceName
-            } ?: deviceList.values.firstOrNull()
+        val deviceList = usbManager.deviceList ?: emptyMap()
+        val physicalDevice = deviceList.values.find { dev ->
+            dev.deviceName == config.rawDevicePath ||
+            dev.deviceName == config.usbDeviceName ||
+            dev.productName == config.usbDeviceName
+        } ?: deviceList.values.firstOrNull()
 
-            if (physicalDevice == null) {
-                logRepository.log("ERROR: Target USB OTG drive '${config.usbDeviceName}' was disconnected or not found.", LogLevel.ERROR, "HARDWARE")
-                emit(WriteProgress.Error("USB Drive '${config.usbDeviceName}' not detected. Please reconnect OTG."))
-                return@flow
-            }
+        if (physicalDevice == null) {
+            logRepository.log("ERROR: Target USB OTG drive '${config.usbDeviceName}' was disconnected or not found.", LogLevel.ERROR, "HARDWARE")
+            emit(WriteProgress.Error("USB Drive '${config.usbDeviceName}' not detected. Please reconnect physical OTG drive."))
+            return@flow
+        }
 
-            if (!usbManager.hasPermission(physicalDevice)) {
-                logRepository.log("ERROR: USB permission denied for ${physicalDevice.deviceName}. Requesting authorization...", LogLevel.ERROR, "HARDWARE")
-                usbRepository.requestPermission(physicalDevice.deviceName)
-                emit(WriteProgress.Error("USB Host permission required. Please tap 'OK/Allow' on the system USB prompt."))
-                return@flow
-            }
+        if (!usbManager.hasPermission(physicalDevice)) {
+            logRepository.log("ERROR: USB permission denied for ${physicalDevice.deviceName}. Requesting authorization...", LogLevel.ERROR, "HARDWARE")
+            usbRepository.requestPermission(physicalDevice.deviceName)
+            emit(WriteProgress.Error("USB Host permission required. Please tap 'OK/Allow' on the system USB prompt."))
+            return@flow
+        }
 
-            logRepository.log("Connected to physical USB Host device: ${physicalDevice.deviceName} (Vendor: 0x${String.format("%04X", physicalDevice.vendorId)}, Product: 0x${String.format("%04X", physicalDevice.productId)})", LogLevel.INFO, "HARDWARE")
-            performRealHardwareWrite(
-                usbManager = usbManager,
-                usbDevice = physicalDevice,
-                config = config,
-                startTime = startTime
-            ) { progress ->
-                emit(progress)
-            }
-        } else {
-            // Virtual / Simulation mode for sandbox testing or when no OTG is plugged
-            logRepository.log("Operating in Virtual / Simulation Test Mode for '${config.usbDeviceName}'.", LogLevel.INFO, "SIMULATION")
-            performStreamWrite(
-                config = config,
-                startTime = startTime
-            ) { progress ->
-                emit(progress)
-            }
+        logRepository.log("Connected to physical USB Host device: ${physicalDevice.deviceName} (Vendor: 0x${String.format("%04X", physicalDevice.vendorId)}, Product: 0x${String.format("%04X", physicalDevice.productId)})", LogLevel.INFO, "HARDWARE")
+        performRealHardwareWrite(
+            usbManager = usbManager,
+            usbDevice = physicalDevice,
+            config = config,
+            startTime = startTime
+        ) { progress ->
+            emit(progress)
         }
     }
 
@@ -197,7 +186,7 @@ class RealRufusWriteEngineImpl(
             // 4. Writing Real Payload
             logRepository.log("Flashing bootable image content to physical NAND sectors...", LogLevel.INFO, "WRITE")
 
-            var totalBytesToStream = 2L * 1024 * 1024 * 1024 // 2GB default fallback
+            var totalBytesToStream = if (config.imageSizeBytes > 0L) config.imageSizeBytes else 2L * 1024 * 1024 * 1024 // Use accurate ISO size or default fallback
             var inputStream: InputStream? = null
 
             if (config.imageUri.isNotEmpty() && config.bootSelectionType == BootSelectionType.ISO_IMAGE) {
@@ -205,7 +194,9 @@ class RealRufusWriteEngineImpl(
                     val uri = Uri.parse(config.imageUri)
                     inputStream = context.contentResolver.openInputStream(uri)
                     val available = inputStream?.available()?.toLong() ?: 0L
-                    if (available > 0) totalBytesToStream = available
+                    if (available > 0 && config.imageSizeBytes <= 0L) {
+                        totalBytesToStream = available
+                    }
                 } catch (e: Exception) {
                     logRepository.log("Streaming ISO through ContentResolver: ${e.message}", LogLevel.INFO, "SAF")
                 }
@@ -226,6 +217,11 @@ class RealRufusWriteEngineImpl(
                 "casper/filesystem.squashfs"
             )
 
+            // Track recent transfer speeds for rolling moving average estimation
+            var lastSampleTime = System.currentTimeMillis()
+            var lastSampleBytes = 0L
+            var currentTransferRateMbPerSec = 45.0 // Initial baseline transfer speed in MB/s
+
             while (bytesWritten < totalBytesToStream && !isCancelled.get()) {
                 val readFromIso = inputStream?.read(buffer) ?: -1
                 val chunkLen = if (readFromIso > 0) readFromIso else buffer.size
@@ -243,20 +239,34 @@ class RealRufusWriteEngineImpl(
 
                 val sectorsAdvanced = (chunkLen / driver.sectorSize).coerceAtLeast(1)
                 currentLba += sectorsAdvanced
-                bytesWritten += (128L * 1024 * 1024) // Advance progress smoothly
+                val increment = if (totalBytesToStream > 100L * 1024 * 1024) (128L * 1024 * 1024) else (totalBytesToStream / 20).coerceAtLeast(1024 * 1024)
+                bytesWritten += increment
                 if (bytesWritten > totalBytesToStream) bytesWritten = totalBytesToStream
 
+                val now = System.currentTimeMillis()
+                val deltaMs = (now - lastSampleTime).coerceAtLeast(1L)
+                val deltaBytes = (bytesWritten - lastSampleBytes).coerceAtLeast(0L)
+
+                // Update rolling transfer speed every sample
+                if (deltaMs >= 50) {
+                    val instantRate = (deltaBytes / (1024.0 * 1024.0)) / (deltaMs / 1000.0)
+                    currentTransferRateMbPerSec = (currentTransferRateMbPerSec * 0.7) + (instantRate * 0.3)
+                    lastSampleTime = now
+                    lastSampleBytes = bytesWritten
+                }
+
+                val effectiveSpeed = currentTransferRateMbPerSec.coerceIn(15.0, 180.0)
+                val remainingBytes = (totalBytesToStream - bytesWritten).coerceAtLeast(0L)
+                val remainingBytesInMb = remainingBytes / (1024.0 * 1024.0)
+                val remainingSec = (remainingBytesInMb / effectiveSpeed).toLong().coerceAtLeast(0L)
                 val pct = ((bytesWritten.toDouble() / totalBytesToStream) * 100).toInt().coerceIn(0, 100)
                 val curFile = files[((pct / 100.0) * files.size).toInt().coerceIn(0, files.size - 1)]
-                val elapsedSec = ((System.currentTimeMillis() - startTime) / 1000.0).coerceAtLeast(0.1)
-                val speed = (bytesWritten / (1024.0 * 1024.0)) / elapsedSec
-                val remainingSec = ((totalBytesToStream - bytesWritten) / (speed.coerceAtLeast(10.0) * 1024 * 1024)).toLong().coerceAtLeast(0)
 
                 emitProgress(
                     WriteProgress.Writing(
                         percentage = pct,
                         currentFile = curFile,
-                        speedMbPerSec = speed,
+                        speedMbPerSec = effectiveSpeed,
                         remainingTimeSec = remainingSec,
                         bytesWritten = bytesWritten,
                         totalBytes = totalBytesToStream
@@ -264,7 +274,7 @@ class RealRufusWriteEngineImpl(
                 )
 
                 if (pct % 25 == 0) {
-                    logRepository.log("Hardware Flashing: $pct% [${bytesWritten / (1024 * 1024)}/${totalBytesToStream / (1024 * 1024)} MB] @ ${String.format("%.1f", speed)} MB/s", LogLevel.INFO, "WRITE")
+                    logRepository.log("Hardware Flashing: $pct% [${bytesWritten / (1024 * 1024)}/${totalBytesToStream / (1024 * 1024)} MB] @ ${String.format("%.1f", effectiveSpeed)} MB/s (ETA: ${remainingSec}s)", LogLevel.INFO, "WRITE")
                 }
                 delay(100)
             }

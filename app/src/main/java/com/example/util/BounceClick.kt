@@ -15,15 +15,15 @@ import androidx.compose.ui.input.pointer.pointerInput
  * Provides tactile, micro-animated scale feedback on touch down and release.
  */
 fun Modifier.bounceClick(
-    scaleDown: Float = 0.94f,
+    scaleDown: Float = 0.96f,
     onClick: (() -> Unit)? = null
 ): Modifier = composed {
     var isPressed by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(
         targetValue = if (isPressed) scaleDown else 1f,
         animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
-            stiffness = Spring.StiffnessLow
+            dampingRatio = Spring.DampingRatioNoBouncy,
+            stiffness = Spring.StiffnessHigh
         ),
         label = "bounceScale"
     )

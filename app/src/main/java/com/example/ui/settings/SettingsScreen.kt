@@ -78,7 +78,7 @@ fun SettingsScreen(
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
-                    text = "APPEARANCE & TESTING",
+                    text = "APPEARANCE",
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.primary,
@@ -98,23 +98,6 @@ fun SettingsScreen(
                     Switch(
                         checked = uiState.isDarkMode,
                         onCheckedChange = { viewModel.toggleDarkMode(it) }
-                    )
-                }
-
-                Divider(modifier = Modifier.padding(vertical = 10.dp), color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(uiState.strings.simulationMode, fontWeight = FontWeight.Medium, fontSize = 14.sp)
-                        Text("Enable virtual test drives on emulators without physical OTG hardware", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    Switch(
-                        checked = uiState.isSimulationModeEnabled,
-                        onCheckedChange = { viewModel.toggleSimulationMode(it) }
                     )
                 }
             }
@@ -150,6 +133,24 @@ fun SettingsScreen(
                         onClick = { viewModel.setPartitionScheme(PartitionScheme.MBR) },
                         label = { Text("MBR (Legacy BIOS)") },
                         shape = RoundedCornerShape(10.dp)
+                    )
+                }
+
+                Divider(modifier = Modifier.padding(vertical = 10.dp), color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+
+                // Verification Toggle in Settings
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Verify Written Data After Burn", fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                        Text("Read back written media sectors and calculate SHA-256 hash to ensure 100% image integrity", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Switch(
+                        checked = uiState.verifyWrittenData,
+                        onCheckedChange = { viewModel.toggleVerifyWrittenData(it) }
                     )
                 }
 
@@ -194,16 +195,32 @@ fun SettingsScreen(
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    text = "ABOUT ANDROID RUFUS",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary,
-                    letterSpacing = 1.sp
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                Text("Android Rufus v4.5 (Mobile Edition)", fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                Spacer(modifier = Modifier.height(4.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        shadowElevation = 8.dp,
+                        modifier = Modifier.size(52.dp)
+                    ) {
+                        androidx.compose.foundation.Image(
+                            painter = androidx.compose.ui.res.painterResource(id = com.example.R.drawable.rufus_3d_pro_icon_1786875519611),
+                            contentDescription = "Rufus 3D Logo",
+                            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(14.dp))
+                    Column {
+                        Text(
+                            text = "ABOUT ANDROID RUFUS",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary,
+                            letterSpacing = 1.sp
+                        )
+                        Text("Android Rufus v4.5 (Mobile Edition)", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                    }
+                }
+                Spacer(modifier = Modifier.height(10.dp))
                 Text(
                     "Format USB, flash card and virtual drives to FAT/FAT32/NTFS/UDF/exFAT/ReFS/ext2/ext3/ext4. Create FreeDOS, MS-DOS, UEFI Shell, Windows To Go, and bootable Linux/Windows ISO drives with TPM/Secure Boot bypass & OOBE automation.",
                     fontSize = 12.sp,
@@ -215,6 +232,7 @@ fun SettingsScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(88.dp))
     }
 }
+

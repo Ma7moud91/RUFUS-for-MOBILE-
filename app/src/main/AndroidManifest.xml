@@ -15,6 +15,7 @@
     <!-- Live notifications permission for background USB flashing progress -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <!-- USB Host Feature for USB OTG -->
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />

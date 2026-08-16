@@ -14,6 +14,7 @@ interface AppContainer {
     val usbRepository: UsbRepository
     val writeEngine: WriteEngine
     val notificationManager: RufusNotificationManager
+    val feedbackManager: com.example.util.RufusFeedbackManager
 }
 
 class DefaultAppContainer(private val context: Context) : AppContainer {
@@ -31,5 +32,9 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
 
     override val notificationManager: RufusNotificationManager by lazy {
         RufusNotificationManager(context)
+    }
+
+    override val feedbackManager: com.example.util.RufusFeedbackManager by lazy {
+        com.example.util.RufusFeedbackManager(context)
     }
 }

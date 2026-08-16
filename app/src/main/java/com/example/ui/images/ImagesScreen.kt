@@ -217,8 +217,10 @@ fun ImagesScreen(
         // Preset List
         LazyColumn(
             modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = PaddingValues(bottom = 88.dp)
         ) {
+
             items(ImageFile.PRESETS) { preset ->
                 val isSelected = uiState.selectedImage?.fileName == preset.fileName
                 Card(

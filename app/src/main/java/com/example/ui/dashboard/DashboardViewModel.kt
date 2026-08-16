@@ -10,6 +10,7 @@ import com.example.domain.repository.FlowBenchmarkResult
 import com.example.domain.repository.LogRepository
 import com.example.domain.repository.UsbRepository
 import com.example.domain.repository.WriteEngine
+import com.example.util.RufusFeedbackManager
 import com.example.util.RufusNotificationManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -31,17 +32,18 @@ enum class RufusTab(val title: String) {
 data class DashboardUiState(
     val selectedTab: RufusTab = RufusTab.FLASH,
     val selectedDevice: UsbDeviceDomainModel? = null,
-    val selectedImage: ImageFile? = ImageFile.PRESETS.first(),
+    val selectedImage: ImageFile? = null,
     val bootSelectionType: BootSelectionType = BootSelectionType.ISO_IMAGE,
-    val volumeLabel: String = "WIN11_INSTALL",
+    val volumeLabel: String = "RUFUS_DRIVE",
     val partitionScheme: PartitionScheme = PartitionScheme.GPT,
     val targetSystem: TargetSystem = TargetSystem.UEFI_NON_CSM,
-    val fileSystem: FileSystem = FileSystem.NTFS,
+    val fileSystem: FileSystem = FileSystem.FAT32,
     val clusterSize: Int = 16384, // 16 KB
     val quickFormat: Boolean = true,
     val checkBadBlocks: Boolean = false,
     val badBlockPasses: Int = 1,
     val detectFakeFlashDrives: Boolean = true,
+    val verifyWrittenData: Boolean = true,
     val writeProgress: WriteProgress = WriteProgress.Idle,
     val showConfirmDialog: Boolean = false,
     val showOtgAlarmDialog: Boolean = false,
@@ -70,24 +72,27 @@ data class DashboardUiState(
     val imageDumpProgress: Int = 0,
     val isBenchmarkRunning: Boolean = false,
     val lastBenchmark: FlowBenchmarkResult? = null,
-    val isSimulationModeEnabled: Boolean = true,
     val isDarkMode: Boolean = false,
+    val showInvalidFileDialog: Boolean = false,
+    val invalidFileError: String = "",
     val statusMessage: String = "Ready",
     val strings: AppTranslations = RufusStrings.get("en")
 )
+
 
 class DashboardViewModel(
     private val usbRepository: UsbRepository,
     private val writeEngine: WriteEngine,
     private val logRepository: LogRepository,
-    private val notificationManager: RufusNotificationManager? = null
+    private val notificationManager: RufusNotificationManager? = null,
+    private val feedbackManager: RufusFeedbackManager? = null
 ) : ViewModel() {
 
     val availableDevices: StateFlow<List<UsbDeviceDomainModel>> = usbRepository.connectedDevices
         .stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5000),
-            initialValue = UsbDeviceDomainModel.SIMULATED_DEVICES
+            initialValue = emptyList()
         )
 
     val systemLogs: StateFlow<List<LogEntry>> = logRepository.logs
@@ -114,21 +119,6 @@ class DashboardViewModel(
                     _uiState.update { it.copy(selectedDevice = null) }
                 }
             }
-        }
-
-        // Initialize with default preset checksum
-        val defaultPreset = ImageFile.PRESETS.first()
-        _uiState.update {
-            it.copy(
-                checksumResult = ChecksumResult(
-                    fileName = defaultPreset.fileName,
-                    fileSizeFormatted = defaultPreset.sizeFormatted,
-                    md5 = defaultPreset.hashMd5 ?: "",
-                    sha1 = defaultPreset.hashSha1 ?: "",
-                    sha256 = defaultPreset.hashSha256 ?: "",
-                    sha512 = defaultPreset.hashSha512 ?: ""
-                )
-            )
         }
     }
 
@@ -183,7 +173,29 @@ class DashboardViewModel(
         logRepository.log("Boot selection changed to: ${type.label}", LogLevel.INFO, "CONFIG")
     }
 
+    fun dismissInvalidFileDialog() {
+        _uiState.update { it.copy(showInvalidFileDialog = false, invalidFileError = "") }
+    }
+
+
+    fun reportInvalidFile(name: String, extension: String) {
+        val errorMsg = "The file '$name' is not a supported bootable disk image (extension: .${extension.ifEmpty { "unknown" }}).\n\nRufus can only write verified bootable image formats:\n• .ISO (Standard CD/DVD/OS Installation Media)\n• .IMG / .RAW (Raw Sector Disk Images)\n• .VHD / .VHDX (Virtual Hard Disk Images)\n• .BIN / .DMG / .WIM / .ESD (System Images)\n• .GZ / .XZ / .BZ2 / .ZST / .ZIP (Compressed Disk Images)"
+        _uiState.update {
+            it.copy(
+                showInvalidFileDialog = true,
+                invalidFileError = errorMsg
+            )
+        }
+        logRepository.log("SECURITY REJECTION: '$name' is not a trusted bootable disk image. Operation aborted.", LogLevel.ERROR, "SECURITY")
+    }
+
     fun selectImage(uri: Uri, name: String, size: Long, context: Context? = null) {
+        val extension = name.substringAfterLast('.', "").lowercase()
+        if (extension.isEmpty() || !ALLOWED_FLASH_EXTENSIONS.contains(extension)) {
+            reportInvalidFile(name, extension)
+            return
+        }
+
         val lower = name.lowercase()
         val isWindows = lower.contains("win") || lower.contains("windows")
         val isLinux = lower.contains("ubuntu") || lower.contains("debian") || lower.contains("arch") || lower.contains("fedora") || lower.contains("mint") || lower.contains("kali")
@@ -229,6 +241,7 @@ class DashboardViewModel(
             calculateChecksums(uri, name, size, context)
         }
     }
+
 
     fun selectPresetImage(preset: ImageFile) {
         val cleanLabel = preset.fileName.substringBeforeLast(".").take(11).replace(Regex("[^A-Za-z0-9_]"), "_").uppercase()
@@ -501,13 +514,13 @@ class DashboardViewModel(
         _uiState.update { it.copy(detectFakeFlashDrives = enabled) }
     }
 
-    fun toggleDarkMode(enabled: Boolean) {
-        _uiState.update { it.copy(isDarkMode = enabled) }
+    fun toggleVerifyWrittenData(enabled: Boolean) {
+        _uiState.update { it.copy(verifyWrittenData = enabled) }
+        logRepository.log("Post-burn data verification ${if (enabled) "ENABLED" else "DISABLED"}.", LogLevel.INFO, "CONFIG")
     }
 
-    fun toggleSimulationMode(enabled: Boolean) {
-        _uiState.update { it.copy(isSimulationModeEnabled = enabled) }
-        usbRepository.setSimulationMode(enabled)
+    fun toggleDarkMode(enabled: Boolean) {
+        _uiState.update { it.copy(isDarkMode = enabled) }
     }
 
     fun runDeviceBenchmark() {
@@ -638,7 +651,8 @@ class DashboardViewModel(
             isWindowsImage = isWin,
             isLinuxImage = isLinux,
             sourceSha256 = state.selectedImage?.hashSha256 ?: state.checksumResult?.sha256 ?: "",
-            verifySha256AfterBurn = true
+            verifySha256AfterBurn = state.verifyWrittenData,
+            imageSizeBytes = state.selectedImage?.sizeBytes ?: 0L
         )
 
         viewModelScope.launch {
@@ -650,6 +664,12 @@ class DashboardViewModel(
                     deviceName = dev.productName,
                     label = state.volumeLabel
                 )
+
+                if (progress is WriteProgress.Completed) {
+                    feedbackManager?.notifySuccess()
+                } else if (progress is WriteProgress.Error) {
+                    feedbackManager?.notifyFailure()
+                }
             }
         }
     }
@@ -683,16 +703,22 @@ class DashboardViewModel(
     }
 
     companion object {
+        val ALLOWED_FLASH_EXTENSIONS = setOf(
+            "iso", "img", "raw", "vhd", "vhdx", "bin", "gz", "xz", "bz2", "zst", "zip", "dmg", "toast", "wim", "esd"
+        )
+
         fun provideFactory(
             usbRepository: UsbRepository,
             writeEngine: WriteEngine,
             logRepository: LogRepository,
-            notificationManager: RufusNotificationManager? = null
+            notificationManager: RufusNotificationManager? = null,
+            feedbackManager: RufusFeedbackManager? = null
         ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                return DashboardViewModel(usbRepository, writeEngine, logRepository, notificationManager) as T
+                return DashboardViewModel(usbRepository, writeEngine, logRepository, notificationManager, feedbackManager) as T
             }
         }
     }
 }
+

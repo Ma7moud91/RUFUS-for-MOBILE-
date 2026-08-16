@@ -96,8 +96,10 @@ fun DrivesScreen(
         // List of USB Drives
         LazyColumn(
             modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            contentPadding = PaddingValues(bottom = 88.dp)
         ) {
+
             items(availableDevices) { device ->
                 val isSelected = uiState.selectedDevice?.deviceName == device.deviceName
                 UsbDriveDetailCard(
@@ -123,7 +125,7 @@ fun DrivesScreen(
                             Text("No Storage Devices Detected", fontWeight = FontWeight.Bold, fontSize = 15.sp)
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                "Connect a USB OTG drive or enable Simulation Mode in Settings.",
+                                "Connect a physical USB OTG flash drive, SD card, or external SSD via USB adapter.",
                                 textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 fontSize = 12.sp

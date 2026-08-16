@@ -1,8 +1,7 @@
 package com.example.ui.dashboard
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
+import androidx.compose.animation.*
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -62,6 +61,19 @@ fun DashboardScreen(
             TopAppBar(
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            shadowElevation = 4.dp,
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            androidx.compose.foundation.Image(
+                                painter = androidx.compose.ui.res.painterResource(id = com.example.R.drawable.rufus_3d_pro_icon_1786875519611),
+                                contentDescription = "Rufus Logo",
+                                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(10.dp))
                         Text(
                             text = "Rufus",
                             fontWeight = FontWeight.Bold,
@@ -129,52 +141,128 @@ fun DashboardScreen(
                 )
             )
         },
-        bottomBar = {
-            FloatingNavDock(
-                currentTab = uiState.selectedTab,
-                onTabSelected = { viewModel.selectTab(it) },
-                translations = uiState.strings
-            )
-        },
         containerColor = MaterialTheme.colorScheme.background
     ) { paddingValues ->
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(paddingValues)
+                .padding(top = paddingValues.calculateTopPadding())
         ) {
-            when (uiState.selectedTab) {
-                RufusTab.FLASH -> {
-                    FlashTabContent(
-                        uiState = uiState,
-                        onDeviceClick = { showDeviceSheet = true },
-                        onSelectImageClick = onSelectImageClick,
-                        onPresetsClick = { showPresetSheet = true },
-                        onOpenChecksumClick = { viewModel.openChecksumDialog() },
-                        onBootSelectionTypeChange = { viewModel.setBootSelectionType(it) },
-                        onWindowsOptionsClick = { viewModel.openWindowsOptionsDialog() },
-                        onLinuxPersistenceChange = { viewModel.updateLinuxPersistence(it) },
-                        onVolumeLabelChange = { viewModel.setVolumeLabel(it) },
-                        onPartitionSchemeChange = { viewModel.setPartitionScheme(it) },
-                        onTargetSystemChange = { viewModel.setTargetSystem(it) },
-                        onFileSystemChange = { viewModel.setFileSystem(it) },
-                        onClusterSizeChange = { viewModel.setClusterSize(it) },
-                        onQuickFormatToggle = { viewModel.toggleQuickFormat(it) },
-                        onBadBlocksToggle = { viewModel.toggleCheckBadBlocks(it) },
-                        onBadBlockPassesChange = { viewModel.setBadBlockPasses(it) },
-                        onFakeDriveToggle = { viewModel.toggleFakeFlashDriveDetection(it) },
-                        onStartClick = { viewModel.onStartClicked() },
-                        onCancelClick = { viewModel.cancelWriting() }
-                    )
+            AnimatedContent(
+                targetState = uiState.selectedTab,
+                transitionSpec = {
+                    val forward = targetState.ordinal > initialState.ordinal
+                    (slideInHorizontally(
+                        animationSpec = spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow),
+                        initialOffsetX = { if (forward) it / 5 else -it / 5 }
+                    ) + fadeIn(animationSpec = tween(220)))
+                        .togetherWith(
+                            slideOutHorizontally(
+                                animationSpec = spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow),
+                                targetOffsetX = { if (forward) -it / 5 else it / 5 }
+                            ) + fadeOut(animationSpec = tween(160))
+                        )
+                },
+                label = "tabTransition",
+                modifier = Modifier.fillMaxSize()
+            ) { targetTab ->
+                when (targetTab) {
+                    RufusTab.FLASH -> {
+                        FlashTabContent(
+                            uiState = uiState,
+                            onDeviceClick = { showDeviceSheet = true },
+                            onSelectImageClick = onSelectImageClick,
+                            onPresetsClick = { showPresetSheet = true },
+                            onOpenChecksumClick = { viewModel.openChecksumDialog() },
+                            onBootSelectionTypeChange = { viewModel.setBootSelectionType(it) },
+                            onWindowsOptionsClick = { viewModel.openWindowsOptionsDialog() },
+                            onLinuxPersistenceChange = { viewModel.updateLinuxPersistence(it) },
+                            onVolumeLabelChange = { viewModel.setVolumeLabel(it) },
+                            onPartitionSchemeChange = { viewModel.setPartitionScheme(it) },
+                            onTargetSystemChange = { viewModel.setTargetSystem(it) },
+                            onFileSystemChange = { viewModel.setFileSystem(it) },
+                            onClusterSizeChange = { viewModel.setClusterSize(it) },
+                            onQuickFormatToggle = { viewModel.toggleQuickFormat(it) },
+                            onBadBlocksToggle = { viewModel.toggleCheckBadBlocks(it) },
+                            onBadBlockPassesChange = { viewModel.setBadBlockPasses(it) },
+                            onFakeDriveToggle = { viewModel.toggleFakeFlashDriveDetection(it) },
+                            onVerifyWrittenDataToggle = { viewModel.toggleVerifyWrittenData(it) },
+                            onStartClick = { viewModel.onStartClicked() },
+                            onCancelClick = { viewModel.cancelWriting() }
+                        )
+                    }
+                    RufusTab.DRIVES -> DrivesScreen(viewModel = viewModel)
+                    RufusTab.IMAGES -> ImagesScreen(viewModel = viewModel, onSelectImageClick = onSelectImageClick)
+                    RufusTab.DOWNLOAD -> DownloadScreen(viewModel = viewModel)
+                    RufusTab.LOGS -> LogsScreen(viewModel = viewModel)
+                    RufusTab.SETTINGS -> SettingsScreen(viewModel = viewModel)
                 }
-                RufusTab.DRIVES -> DrivesScreen(viewModel = viewModel)
-                RufusTab.IMAGES -> ImagesScreen(viewModel = viewModel, onSelectImageClick = onSelectImageClick)
-                RufusTab.DOWNLOAD -> DownloadScreen(viewModel = viewModel)
-                RufusTab.LOGS -> LogsScreen(viewModel = viewModel)
-                RufusTab.SETTINGS -> SettingsScreen(viewModel = viewModel)
             }
+
+            // Pure floating dock overlay (no solid space or background bar underneath)
+            FloatingNavDock(
+                currentTab = uiState.selectedTab,
+                onTabSelected = { viewModel.selectTab(it) },
+                translations = uiState.strings,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(bottom = 8.dp)
+            )
         }
     }
+
+    // Invalid / Untrusted File Extension Dialog
+    if (uiState.showInvalidFileDialog) {
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissInvalidFileDialog() },
+            icon = {
+                Surface(
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    modifier = Modifier.size(56.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            Icons.Default.ErrorOutline,
+                            contentDescription = "Invalid File",
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(32.dp)
+                        )
+                    }
+                }
+            },
+            title = {
+                Text(
+                    text = "UNSUPPORTED DISK IMAGE",
+                    fontWeight = FontWeight.Black,
+                    fontSize = 17.sp,
+                    color = MaterialTheme.colorScheme.error,
+                    textAlign = TextAlign.Center
+                )
+            },
+            text = {
+                Text(
+                    text = uiState.invalidFileError,
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = { viewModel.dismissInvalidFileDialog() },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text("OK, GOT IT", fontWeight = FontWeight.Bold)
+                }
+            },
+            shape = RoundedCornerShape(24.dp),
+            containerColor = MaterialTheme.colorScheme.surface
+        )
+    }
+
 
     // OTG Missing / Disconnected Alarm Dialog
     if (uiState.showOtgAlarmDialog) {
@@ -684,7 +772,7 @@ fun DashboardScreen(
 
                 if (availableDevices.isEmpty()) {
                     Text(
-                        text = "No devices detected. Enable Simulation Mode in Settings or plug in an OTG drive.",
+                        text = "No USB devices detected. Connect a physical USB OTG drive or flash memory card.",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 13.sp
                     )
@@ -810,6 +898,7 @@ fun FlashTabContent(
     onBadBlocksToggle: (Boolean) -> Unit,
     onBadBlockPassesChange: (Int) -> Unit,
     onFakeDriveToggle: (Boolean) -> Unit,
+    onVerifyWrittenDataToggle: (Boolean) -> Unit = {},
     onStartClick: () -> Unit,
     onCancelClick: () -> Unit
 ) {
@@ -928,7 +1017,9 @@ fun FlashTabContent(
             badBlockPasses = uiState.badBlockPasses,
             onBadBlockPassesChange = onBadBlockPassesChange,
             detectFakeFlashDrives = uiState.detectFakeFlashDrives,
-            onFakeDriveToggle = onFakeDriveToggle
+            onFakeDriveToggle = onFakeDriveToggle,
+            verifyWrittenData = uiState.verifyWrittenData,
+            onVerifyWrittenDataToggle = onVerifyWrittenDataToggle
         )
 
         // Live Circular & Status Progress Gauge Card
@@ -950,9 +1041,10 @@ fun FlashTabContent(
             startAgainButtonText = uiState.strings.startAgainButton
         )
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(88.dp))
     }
 }
+
 
 @Composable
 fun InteractiveDeviceCard(
@@ -991,12 +1083,12 @@ fun InteractiveDeviceCard(
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     if (device != null) {
                         Surface(
-                            color = if (!device.isSimulated) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiaryContainer,
+                            color = MaterialTheme.colorScheme.primary,
                             shape = CircleShape
                         ) {
                             Text(
-                                text = if (!device.isSimulated) "HARDWARE OTG" else "VIRTUAL DISK",
-                                color = if (!device.isSimulated) Color.White else MaterialTheme.colorScheme.onTertiaryContainer,
+                                text = "HARDWARE OTG",
+                                color = Color.White,
                                 fontSize = 9.sp,
                                 fontWeight = FontWeight.Bold,
                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
@@ -1375,7 +1467,9 @@ fun InteractiveFormatOptionsCard(
     badBlockPasses: Int,
     onBadBlockPassesChange: (Int) -> Unit,
     detectFakeFlashDrives: Boolean,
-    onFakeDriveToggle: (Boolean) -> Unit
+    onFakeDriveToggle: (Boolean) -> Unit,
+    verifyWrittenData: Boolean = true,
+    onVerifyWrittenDataToggle: (Boolean) -> Unit = {}
 ) {
     var fsExpanded by remember { mutableStateOf(false) }
     var clusterExpanded by remember { mutableStateOf(false) }
@@ -1496,6 +1590,27 @@ fun InteractiveFormatOptionsCard(
                 Text("Quick format", fontSize = 14.sp)
             }
 
+            // Verify written data Checkbox
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable { onVerifyWrittenDataToggle(!verifyWrittenData) }
+                    .padding(vertical = 8.dp, horizontal = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Checkbox(
+                    checked = verifyWrittenData,
+                    onCheckedChange = { onVerifyWrittenDataToggle(it) },
+                    modifier = Modifier.size(24.dp)
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Column {
+                    Text("Verify written data", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Text("Run bit-for-bit SHA-256 integrity verification after burn", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+
             // Check bad blocks
             Row(
                 modifier = Modifier
@@ -1560,7 +1675,7 @@ fun CircularWriteProgressGauge(
 ) {
     val animatedProgress by animateFloatAsState(
         targetValue = percentage / 100f,
-        animationSpec = tween(durationMillis = 300),
+        animationSpec = tween(durationMillis = 120),
         label = "circularProgress"
     )
 
@@ -1726,13 +1841,44 @@ fun CircularAndLiveStatusCard(progress: WriteProgress) {
                             color = Color.White
                         )
 
-                        if (remainingSec > 0) {
-                            Text(
-                                text = "Estimated time remaining: ${remainingSec}s",
-                                fontSize = 11.sp,
-                                fontFamily = FontFamily.Monospace,
-                                color = TerminalHeader
-                            )
+                        if (progress is WriteProgress.Writing) {
+                            val remainingSec = progress.remainingTimeSec
+                            val formattedTime = if (remainingSec >= 60) {
+                                val mins = remainingSec / 60
+                                val secs = remainingSec % 60
+                                "${mins}m ${secs}s"
+                            } else {
+                                "${remainingSec}s"
+                            }
+
+                            val writtenMb = progress.bytesWritten / (1024 * 1024)
+                            val totalMb = progress.totalBytes / (1024 * 1024)
+                            val remainingMb = ((progress.totalBytes - progress.bytesWritten).coerceAtLeast(0L)) / (1024 * 1024)
+
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Surface(
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = TerminalHeader.copy(alpha = 0.2f)
+                                ) {
+                                    Text(
+                                        text = "ETA: $formattedTime",
+                                        fontSize = 11.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold,
+                                        color = TerminalHeader,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                                Text(
+                                    text = "$remainingMb MB remaining",
+                                    fontSize = 10.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
 
                         if (currentFile.isNotEmpty()) {
@@ -1755,7 +1901,10 @@ fun CircularAndLiveStatusCard(progress: WriteProgress) {
                 is WriteProgress.Analyzing -> progress.message
                 is WriteProgress.Partitioning -> progress.message
                 is WriteProgress.Formatting -> progress.message
-                is WriteProgress.Writing -> "Writing payload at ${String.format("%.1f", progress.speedMbPerSec)} MB/s (${progress.remainingTimeSec}s left)"
+                is WriteProgress.Writing -> {
+                    val etaFormatted = if (progress.remainingTimeSec >= 60) "${progress.remainingTimeSec / 60}m ${progress.remainingTimeSec % 60}s" else "${progress.remainingTimeSec}s"
+                    "Writing payload at ${String.format("%.1f", progress.speedMbPerSec)} MB/s • ETA: $etaFormatted"
+                }
                 is WriteProgress.InstallingBootloader -> "Installing ${progress.bootloaderType}..."
                 is WriteProgress.Verifying -> progress.message
                 is WriteProgress.Completed -> "SUCCESS: Bootable media created in ${progress.totalTimeSec}s (${String.format("%.1f", progress.averageSpeedMbPerSec)} MB/s)!"

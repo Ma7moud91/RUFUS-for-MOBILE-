@@ -209,8 +209,10 @@ fun DownloadScreen(
         // ISO Catalog List
         LazyColumn(
             modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            contentPadding = PaddingValues(bottom = 88.dp)
         ) {
+
             items(filteredList, key = { it.id }) { item ->
                 Card(
                     shape = RoundedCornerShape(22.dp),
@@ -274,6 +276,14 @@ fun DownloadScreen(
                             fontFamily = FontFamily.Monospace,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
                         )
+                        if (item.sha256Checksum.isNotEmpty()) {
+                            Text(
+                                text = "SHA-256: ${item.sha256Checksum}",
+                                fontSize = 10.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.9f)
+                            )
+                        }
 
                         Spacer(modifier = Modifier.height(14.dp))
 

@@ -62,7 +62,8 @@ data class WriteConfig(
     val isWindowsImage: Boolean = false,
     val isLinuxImage: Boolean = false,
     val sourceSha256: String = "",
-    val verifySha256AfterBurn: Boolean = true
+    val verifySha256AfterBurn: Boolean = true,
+    val imageSizeBytes: Long = 0L
 )
 
 enum class PartitionScheme(val label: String) {

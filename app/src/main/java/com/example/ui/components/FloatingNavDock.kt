@@ -1,9 +1,8 @@
 package com.example.ui.components
 
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.Spring
+import android.os.Build
+import androidx.compose.animation.*
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -18,7 +17,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -47,8 +48,8 @@ val DOCK_TABS = listOf(
 )
 
 /**
- * Modern Google Material 3 Expressive Floating Navigation Dock.
- * Features glassmorphic tonal blur, spring physics pill transitions, and haptic feedback.
+ * Modern Glassmorphic Floating Navigation Dock with Dynamic Blur, Specular Highlights,
+ * and Silky-Smooth Spring Physics Transitions.
  */
 @Composable
 fun FloatingNavDock(
@@ -73,57 +74,148 @@ fun FloatingNavDock(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 12.dp),
+            .padding(horizontal = 14.dp, vertical = 6.dp),
         contentAlignment = Alignment.Center
     ) {
-        Surface(
-            shape = RoundedCornerShape(28.dp),
-            color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.94f),
-            shadowElevation = 12.dp,
-            tonalElevation = 6.dp,
-            border = CardDefaults.outlinedCardBorder().copy(
-                brush = Brush.verticalGradient(
-                    listOf(
-                        MaterialTheme.colorScheme.primary.copy(alpha = 0.35f),
-                        MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f)
+        // Frosted Glass Outer Wrapper
+        Box(
+            modifier = Modifier
+                .wrapContentWidth()
+                .shadow(
+                    elevation = 20.dp,
+                    shape = RoundedCornerShape(34.dp),
+                    spotColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.38f),
+                    ambientColor = Color.Black.copy(alpha = 0.28f)
+                )
+                .clip(RoundedCornerShape(34.dp))
+                .background(
+                    brush = Brush.verticalGradient(
+                        colors = listOf(
+                            MaterialTheme.colorScheme.surface.copy(alpha = 0.82f),
+                            MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.72f)
+                        )
                     )
                 )
-            ),
-            modifier = Modifier.wrapContentWidth()
+                .border(
+                    width = 1.2.dp,
+                    brush = Brush.verticalGradient(
+                        listOf(
+                            Color.White.copy(alpha = 0.55f),
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.40f),
+                            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.18f)
+                        )
+                    ),
+                    shape = RoundedCornerShape(34.dp)
+                )
         ) {
+            // Glass Reflection Sheen Highlight (Top half)
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .clip(RoundedCornerShape(34.dp))
+                    .background(
+                        brush = Brush.verticalGradient(
+                            colors = listOf(
+                                Color.White.copy(alpha = 0.12f),
+                                Color.White.copy(alpha = 0.02f),
+                                Color.Transparent
+                            )
+                        )
+                    )
+            )
+
+            // Inner Tabs Row
             Row(
                 modifier = Modifier
-                    .padding(horizontal = 8.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    .padding(horizontal = 7.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(3.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 localizedTabs.forEach { item ->
                     val isSelected = currentTab == item.tab
 
+                    // Smooth animated scale for icon
+                    val iconScale by animateFloatAsState(
+                        targetValue = if (isSelected) 1.15f else 1.0f,
+                        animationSpec = spring(
+                            dampingRatio = Spring.DampingRatioMediumBouncy,
+                            stiffness = Spring.StiffnessMediumLow
+                        ),
+                        label = "iconScale"
+                    )
+
+                    // Smooth animated vertical translation offset
+                    val iconOffsetY by animateDpAsState(
+                        targetValue = if (isSelected) (-1.5).dp else 0.dp,
+                        animationSpec = spring(
+                            dampingRatio = Spring.DampingRatioMediumBouncy,
+                            stiffness = Spring.StiffnessMediumLow
+                        ),
+                        label = "iconOffset"
+                    )
+
+                    // Smooth background color transition
                     val animatedPillColor by animateColorAsState(
-                        targetValue = if (isSelected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
-                        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium),
+                        targetValue = if (isSelected) {
+                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.95f)
+                        } else {
+                            Color.Transparent
+                        },
+                        animationSpec = spring(
+                            dampingRatio = Spring.DampingRatioNoBouncy,
+                            stiffness = Spring.StiffnessMediumLow
+                        ),
                         label = "pillColor"
                     )
 
+                    // Smooth content color transition
                     val animatedContentColor by animateColorAsState(
-                        targetValue = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
-                        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium),
+                        targetValue = if (isSelected) {
+                            MaterialTheme.colorScheme.onPrimaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f)
+                        },
+                        animationSpec = spring(
+                            dampingRatio = Spring.DampingRatioNoBouncy,
+                            stiffness = Spring.StiffnessMediumLow
+                        ),
                         label = "contentColor"
                     )
 
                     Surface(
-                        shape = RoundedCornerShape(20.dp),
+                        shape = RoundedCornerShape(24.dp),
                         color = animatedPillColor,
+                        shadowElevation = if (isSelected) 4.dp else 0.dp,
+                        border = if (isSelected) {
+                            CardDefaults.outlinedCardBorder().copy(
+                                brush = Brush.verticalGradient(
+                                    listOf(
+                                        Color.White.copy(alpha = 0.6f),
+                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
+                                    )
+                                ),
+                                width = 1.dp
+                            )
+                        } else null,
                         modifier = Modifier
-                            .clip(RoundedCornerShape(20.dp))
-                            .bounceClick(scaleDown = 0.90f) {
+                            .clip(RoundedCornerShape(24.dp))
+                            .bounceClick(scaleDown = 0.93f) {
                                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                 onTabSelected(item.tab)
                             }
                     ) {
                         Row(
-                            modifier = Modifier.padding(horizontal = if (isSelected) 14.dp else 10.dp, vertical = 10.dp),
+                            modifier = Modifier
+                                .animateContentSize(
+                                    animationSpec = spring(
+                                        dampingRatio = Spring.DampingRatioLowBouncy,
+                                        stiffness = Spring.StiffnessMediumLow
+                                    )
+                                )
+                                .padding(
+                                    horizontal = if (isSelected) 14.dp else 10.dp,
+                                    vertical = 10.dp
+                                ),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.Center
                         ) {
@@ -131,16 +223,38 @@ fun FloatingNavDock(
                                 imageVector = if (isSelected) item.selectedIcon else item.unselectedIcon,
                                 contentDescription = item.label,
                                 tint = animatedContentColor,
-                                modifier = Modifier.size(20.dp)
+                                modifier = Modifier
+                                    .size(21.dp)
+                                    .offset(y = iconOffsetY)
+                                    .scale(iconScale)
                             )
-                            if (isSelected) {
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = item.label,
-                                    color = animatedContentColor,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold
+                            AnimatedVisibility(
+                                visible = isSelected,
+                                enter = fadeIn(animationSpec = tween(180)) + expandHorizontally(
+                                    animationSpec = spring(
+                                        dampingRatio = Spring.DampingRatioNoBouncy,
+                                        stiffness = Spring.StiffnessMediumLow
+                                    ),
+                                    expandFrom = Alignment.Start
+                                ),
+                                exit = fadeOut(animationSpec = tween(120)) + shrinkHorizontally(
+                                    animationSpec = spring(
+                                        dampingRatio = Spring.DampingRatioNoBouncy,
+                                        stiffness = Spring.StiffnessMediumLow
+                                    ),
+                                    shrinkTowards = Alignment.Start
                                 )
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = item.label,
+                                        color = animatedContentColor,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1
+                                    )
+                                }
                             }
                         }
                     }

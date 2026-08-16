@@ -40,7 +40,7 @@ fun AppIntroSplash(
 
     LaunchedEffect(Unit) {
         animationStarted = true
-        delay(2200)
+        delay(1400)
         onIntroComplete()
     }
 
@@ -49,34 +49,34 @@ fun AppIntroSplash(
         initialValue = 0f,
         targetValue = 360f,
         animationSpec = infiniteRepeatable(
-            animation = tween(4000, easing = LinearEasing),
+            animation = tween(2200, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
         ),
         label = "rotation"
     )
 
     val pulseScale by infiniteTransition.animateFloat(
-        initialValue = 0.95f,
-        targetValue = 1.08f,
+        initialValue = 0.98f,
+        targetValue = 1.04f,
         animationSpec = infiniteRepeatable(
-            animation = tween(1200, easing = FastOutSlowInEasing),
+            animation = tween(600, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse
         ),
         label = "pulseScale"
     )
 
     val logoScale by animateFloatAsState(
-        targetValue = if (animationStarted) 1f else 0.4f,
+        targetValue = if (animationStarted) 1f else 0.5f,
         animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
-            stiffness = Spring.StiffnessLow
+            dampingRatio = Spring.DampingRatioNoBouncy,
+            stiffness = Spring.StiffnessHigh
         ),
         label = "logoScale"
     )
 
     val textAlpha by animateFloatAsState(
         targetValue = if (animationStarted) 1f else 0f,
-        animationSpec = tween(800, delayMillis = 300, easing = FastOutSlowInEasing),
+        animationSpec = tween(400, delayMillis = 150, easing = FastOutSlowInEasing),
         label = "textAlpha"
     )
 
@@ -129,27 +129,33 @@ fun AppIntroSplash(
                     )
                 }
 
-                // Pulsing Center Orb
+                // Pulsing Center Orb with 3D Icon
                 Surface(
-                    shape = CircleShape,
-                    color = MaterialTheme.colorScheme.primary,
-                    shadowElevation = 16.dp,
+                    shape = RoundedCornerShape(28.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    shadowElevation = 24.dp,
+                    border = CardDefaults.outlinedCardBorder().copy(
+                        brush = Brush.linearGradient(
+                            listOf(
+                                Color(0xFF00E5FF),
+                                Color(0xFF2979FF),
+                                Color(0xFF651FFF)
+                            )
+                        ),
+                        width = 1.5.dp
+                    ),
                     modifier = Modifier
-                        .size(100.dp)
+                        .size(112.dp)
                         .scale(pulseScale)
                 ) {
-                    Box(
-                        contentAlignment = Alignment.Center,
+                    androidx.compose.foundation.Image(
+                        painter = androidx.compose.ui.res.painterResource(id = com.example.R.drawable.rufus_3d_pro_icon_1786875519611),
+                        contentDescription = "Rufus 3D Logo",
+                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
                         modifier = Modifier.fillMaxSize()
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Usb,
-                            contentDescription = "Rufus Logo",
-                            tint = Color.White,
-                            modifier = Modifier.size(52.dp)
-                        )
-                    }
+                    )
                 }
+
             }
 
             Spacer(modifier = Modifier.height(28.dp))

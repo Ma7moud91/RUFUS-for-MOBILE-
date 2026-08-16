@@ -29,7 +29,8 @@ class MainActivity : ComponentActivity() {
             usbRepository = appContainer.usbRepository,
             writeEngine = appContainer.writeEngine,
             logRepository = appContainer.logRepository,
-            notificationManager = appContainer.notificationManager
+            notificationManager = appContainer.notificationManager,
+            feedbackManager = appContainer.feedbackManager
         )
     }
 
@@ -44,10 +45,19 @@ class MainActivity : ComponentActivity() {
             val docFile = DocumentFile.fromSingleUri(this, selectedUri)
             val name = docFile?.name ?: "custom-disk-image.iso"
             val size = docFile?.length() ?: 0L
+            val ext = name.substringAfterLast('.', "").lowercase()
+
+            if (ext.isEmpty() || !DashboardViewModel.ALLOWED_FLASH_EXTENSIONS.contains(ext)) {
+                dashboardViewModel.reportInvalidFile(name, ext)
+                Toast.makeText(this, "Invalid File: '$name' is not a supported bootable disk image (.iso, .img, .raw, etc.)", Toast.LENGTH_LONG).show()
+                return@let
+            }
+
             dashboardViewModel.selectImage(selectedUri, name, size, this)
             Toast.makeText(this, "Selected: $name", Toast.LENGTH_SHORT).show()
         }
     }
+
 
     private val requestPermissionsLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
