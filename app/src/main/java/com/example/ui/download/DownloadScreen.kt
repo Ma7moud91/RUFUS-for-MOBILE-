@@ -69,7 +69,10 @@ fun DownloadScreen(
         // Header
         Card(
             shape = RoundedCornerShape(24.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)),
+            border = CardDefaults.outlinedCardBorder().copy(
+                brush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.primary.copy(alpha = 0.3f))
+            ),
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.padding(18.dp)) {
@@ -82,8 +85,9 @@ fun DownloadScreen(
                         Text(
                             text = uiState.strings.officialIsoHub,
                             style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary
+                            fontWeight = FontWeight.Black,
+                            color = MaterialTheme.colorScheme.primary,
+                            letterSpacing = (-0.5).sp
                         )
                         Text(
                             text = "Genuine Microsoft Windows & verified Linux distribution mirrors",
@@ -93,12 +97,12 @@ fun DownloadScreen(
                     }
                     Surface(
                         shape = CircleShape,
-                        color = MaterialTheme.colorScheme.primaryContainer
+                        color = MaterialTheme.colorScheme.primary
                     ) {
                         Icon(
                             imageVector = Icons.Default.CloudDownload,
                             contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
+                            tint = MaterialTheme.colorScheme.onPrimary,
                             modifier = Modifier.padding(10.dp).size(22.dp)
                         )
                     }
@@ -119,11 +123,12 @@ fun DownloadScreen(
                             }
                         }
                     },
-                    shape = RoundedCornerShape(16.dp),
+                    shape = RoundedCornerShape(18.dp),
                     singleLine = true,
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedContainerColor = MaterialTheme.colorScheme.surface,
-                        unfocusedContainerColor = MaterialTheme.colorScheme.surface
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+                        unfocusedBorderColor = Color.Transparent
                     ),
                     modifier = Modifier.fillMaxWidth()
                 )

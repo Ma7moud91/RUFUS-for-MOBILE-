@@ -23,6 +23,7 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -154,10 +155,14 @@ fun FloatingNavDock(
                         label = "iconOffset"
                     )
 
+                    // Calculate optimal icon contrast dynamically based on accent color
+                    val accentColor = MaterialTheme.colorScheme.primary
+                    val isLightAccent = accentColor.luminance() > 0.5f
+
                     // Smooth background color transition
                     val animatedPillColor by animateColorAsState(
                         targetValue = if (isSelected) {
-                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.95f)
+                            accentColor
                         } else {
                             Color.Transparent
                         },
@@ -171,7 +176,7 @@ fun FloatingNavDock(
                     // Smooth content color transition
                     val animatedContentColor by animateColorAsState(
                         targetValue = if (isSelected) {
-                            MaterialTheme.colorScheme.onPrimaryContainer
+                            if (isLightAccent) Color.Black else Color.White
                         } else {
                             MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f)
                         },

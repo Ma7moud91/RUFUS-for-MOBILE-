@@ -236,13 +236,13 @@ fun SettingsScreen(
             Column(modifier = Modifier.padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Surface(
-                        shape = RoundedCornerShape(14.dp),
+                        shape = RoundedCornerShape(16.dp),
                         shadowElevation = 8.dp,
-                        modifier = Modifier.size(52.dp)
+                        modifier = Modifier.size(64.dp)
                     ) {
                         androidx.compose.foundation.Image(
-                            painter = androidx.compose.ui.res.painterResource(id = com.example.R.drawable.rufus_3d_pro_icon_1786875519611),
-                            contentDescription = "Rufus 3D Logo",
+                            painter = androidx.compose.ui.res.painterResource(id = com.example.R.drawable.rufus_premium_icon_1786884298007),
+                            contentDescription = "Rufus Premium Logo",
                             contentScale = androidx.compose.ui.layout.ContentScale.Crop,
                             modifier = Modifier.fillMaxSize()
                         )

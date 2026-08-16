@@ -62,12 +62,12 @@ fun DashboardScreen(
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Surface(
-                            shape = RoundedCornerShape(10.dp),
+                            shape = RoundedCornerShape(12.dp),
                             shadowElevation = 4.dp,
-                            modifier = Modifier.size(32.dp)
+                            modifier = Modifier.size(42.dp)
                         ) {
                             androidx.compose.foundation.Image(
-                                painter = androidx.compose.ui.res.painterResource(id = com.example.R.drawable.rufus_3d_pro_icon_1786875519611),
+                                painter = androidx.compose.ui.res.painterResource(id = com.example.R.drawable.rufus_premium_icon_1786884298007),
                                 contentDescription = "Rufus Logo",
                                 contentScale = androidx.compose.ui.layout.ContentScale.Crop,
                                 modifier = Modifier.fillMaxSize()

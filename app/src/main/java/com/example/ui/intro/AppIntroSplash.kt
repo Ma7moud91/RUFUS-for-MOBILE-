@@ -131,7 +131,7 @@ fun AppIntroSplash(
 
                 // Pulsing Center Orb with 3D Icon
                 Surface(
-                    shape = RoundedCornerShape(28.dp),
+                    shape = RoundedCornerShape(32.dp),
                     color = MaterialTheme.colorScheme.surface,
                     shadowElevation = 24.dp,
                     border = CardDefaults.outlinedCardBorder().copy(
@@ -145,11 +145,11 @@ fun AppIntroSplash(
                         width = 1.5.dp
                     ),
                     modifier = Modifier
-                        .size(112.dp)
+                        .size(136.dp)
                         .scale(pulseScale)
                 ) {
                     androidx.compose.foundation.Image(
-                        painter = androidx.compose.ui.res.painterResource(id = com.example.R.drawable.rufus_3d_pro_icon_1786875519611),
+                        painter = androidx.compose.ui.res.painterResource(id = com.example.R.drawable.rufus_premium_icon_1786884298007),
                         contentDescription = "Rufus 3D Logo",
                         contentScale = androidx.compose.ui.layout.ContentScale.Crop,
                         modifier = Modifier.fillMaxSize()
