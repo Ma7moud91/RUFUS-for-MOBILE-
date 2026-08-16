@@ -1,0 +1,6 @@
+{
+  "name": "Android Rufus",
+  "description": "Create bootable USB drives directly from your Android device using USB OTG.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
