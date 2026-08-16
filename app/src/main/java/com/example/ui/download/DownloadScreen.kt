@@ -4,6 +4,10 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import androidx.compose.animation.*
+import androidx.compose.animation.core.*
+import androidx.compose.foundation.lazy.itemsIndexed
+import kotlinx.coroutines.delay
 import android.net.Uri
 import android.widget.Toast
 import androidx.compose.foundation.background
@@ -231,8 +235,22 @@ fun DownloadScreen(
             contentPadding = PaddingValues(bottom = 88.dp)
         ) {
 
-            items(filteredList, key = { it.id }) { item ->
-                Card(
+            itemsIndexed(filteredList, key = { _, item -> item.id }) { index, item ->
+                var isVisible by remember { mutableStateOf(false) }
+
+                LaunchedEffect(Unit) {
+                    delay(index * 60L) // Staggered entrance
+                    isVisible = true
+                }
+
+                AnimatedVisibility(
+                    visible = isVisible,
+                    enter = slideInVertically(
+                        initialOffsetY = { it / 3 },
+                        animationSpec = tween(durationMillis = 500, easing = FastOutSlowInEasing)
+                    ) + fadeIn(animationSpec = tween(durationMillis = 500))
+                ) {
+                    Card(
                     shape = RoundedCornerShape(22.dp),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)),
                     border = CardDefaults.outlinedCardBorder().copy(
@@ -365,6 +383,7 @@ fun DownloadScreen(
                             }
                         }
                     }
+                }
                 }
             }
         }
