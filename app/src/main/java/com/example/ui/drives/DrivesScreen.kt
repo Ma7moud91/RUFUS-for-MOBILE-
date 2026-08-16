@@ -370,10 +370,10 @@ fun BenchmarkCard(
                     contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
                 ) {
                     if (isRunning) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(16.dp),
+                        com.example.ui.components.GlassmorphicPulseLoader(
+                            modifier = Modifier.size(24.dp),
                             color = MaterialTheme.colorScheme.onPrimary,
-                            strokeWidth = 2.dp
+                            coreColor = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.8f)
                         )
                     } else {
                         Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))

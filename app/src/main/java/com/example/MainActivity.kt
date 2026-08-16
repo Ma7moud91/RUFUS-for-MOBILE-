@@ -86,13 +86,14 @@ class MainActivity : ComponentActivity() {
         setContent {
             val uiState by dashboardViewModel.uiState.collectAsState()
 
-            MyApplicationTheme(
-                darkTheme = uiState.isDarkMode,
-                accentColorOverride = uiState.accentColorOverride?.let { androidx.compose.ui.graphics.Color(it) }
-            ) {
-                DashboardScreen(
-                    viewModel = dashboardViewModel,
-                    onSelectImageClick = {
+            com.example.ui.components.ThemeCircularReveal(isDarkMode = uiState.isDarkMode) { darkTheme ->
+                MyApplicationTheme(
+                    darkTheme = darkTheme,
+                    accentColorOverride = uiState.accentColorOverride?.let { androidx.compose.ui.graphics.Color(it) }
+                ) {
+                    DashboardScreen(
+                        viewModel = dashboardViewModel,
+                        onSelectImageClick = {
                         try {
                             pickImageLauncher.launch(arrayOf(
                                 "application/x-iso9660-image",
@@ -106,6 +107,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 )
+            }
             }
         }
     }

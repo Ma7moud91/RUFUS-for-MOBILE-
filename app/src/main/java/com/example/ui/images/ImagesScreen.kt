@@ -151,7 +151,11 @@ fun ImagesScreen(
                     ) {
                         if (uiState.isCalculatingHash) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp, color = TerminalSuccess)
+                                com.example.ui.components.GlassmorphicPulseLoader(
+                                    modifier = Modifier.size(24.dp),
+                                    color = TerminalSuccess,
+                                    coreColor = Color(0xFF15803d)
+                                )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text("Computing checksum digests (MD5, SHA-1, SHA-256, SHA-512)...", fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = Color.White)
                             }

@@ -451,7 +451,11 @@ fun DashboardScreen(
                     ) {
                         if (uiState.isCalculatingHash) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = TerminalSuccess)
+                                com.example.ui.components.GlassmorphicPulseLoader(
+                                    modifier = Modifier.size(24.dp),
+                                    color = TerminalSuccess,
+                                    coreColor = Color(0xFF15803d)
+                                )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text("Computing MD5, SHA-1, SHA-256...", fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = Color.White)
                             }
@@ -630,7 +634,7 @@ fun DashboardScreen(
                         modifier = Modifier.fillMaxWidth().padding(16.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        CircularProgressIndicator()
+                        com.example.ui.components.GlassmorphicPulseLoader(modifier = Modifier.size(48.dp))
                         Spacer(modifier = Modifier.height(10.dp))
                         Text("Analyzing UEFI boot binaries and certificates...", fontSize = 12.sp)
                     }
