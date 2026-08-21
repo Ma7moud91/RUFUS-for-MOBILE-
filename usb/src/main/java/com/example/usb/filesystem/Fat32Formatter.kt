@@ -3,16 +3,49 @@ package com.example.usb.filesystem
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
+data class Fat32FormattedStructures(
+    val vbr: ByteArray,
+    val fsInfo: ByteArray,
+    val backupVbr: ByteArray,
+    val backupFsInfo: ByteArray,
+    val initialFatSector: ByteArray,
+    val initialRootDirSector: ByteArray,
+    val reservedSectors: Int = 32,
+    val sectorsPerFat: Int,
+    val sectorsPerCluster: Int
+)
+
 object Fat32Formatter {
 
     /**
-     * Creates FAT32 Volume Boot Record (512 bytes) and FSInfo sector (512 bytes).
+     * Calculates sectorsPerFat in compliance with the Microsoft FAT32 specification.
      */
-    fun createFat32BootSectors(
+    fun calculateSectorsPerFat(totalPartitionSectors: Long, sectorsPerCluster: Int, reservedSectors: Int = 32, numFats: Int = 2): Int {
+        val bytesPerSector = 512L
+        val bytesPerCluster = sectorsPerCluster.toLong() * bytesPerSector
+        val numerator = (totalPartitionSectors - reservedSectors).coerceAtLeast(1024L)
+        val denominator = (bytesPerCluster / 4L) + numFats
+        val fatSize = ((numerator + denominator - 1L) / denominator).coerceAtLeast(512L)
+        return (if (fatSize > 0xFFFFFFFFL) 0xFFFFFFFFL else fatSize).toInt()
+    }
+
+    /**
+     * Creates complete FAT32 filesystem structures:
+     * - VBR (Sector 0) & Backup VBR (Sector 6)
+     * - FSInfo (Sector 1) & Backup FSInfo (Sector 7)
+     * - Initial FAT table sector (FAT1 & FAT2)
+     * - Initial Root Directory sector with Volume Label
+     */
+    fun createCompleteFat32Structures(
         totalPartitionSectors: Long,
         volumeLabel: String = "RUFUS",
-        sectorsPerCluster: Int = 8 // 4KB cluster with 512B sectors
-    ): Pair<ByteArray, ByteArray> {
+        sectorsPerCluster: Int = 8, // 4KB clusters with 512B sectors
+        startLbaOffset: Int = 2048
+    ): Fat32FormattedStructures {
+        val reservedSectors = 32
+        val numFats = 2
+        val sectorsPerFat = calculateSectorsPerFat(totalPartitionSectors, sectorsPerCluster, reservedSectors, numFats)
+
         val vbr = ByteArray(512)
         val buf = ByteBuffer.wrap(vbr).order(ByteOrder.LITTLE_ENDIAN)
 
@@ -22,19 +55,19 @@ object Fat32Formatter {
         buf.put("MSDOS5.0".toByteArray(Charsets.US_ASCII))
         buf.putShort(512.toShort()) // Bytes per sector
         buf.put(sectorsPerCluster.toByte()) // Sectors per cluster
-        buf.putShort(32.toShort()) // Reserved sector count (32 sectors)
-        buf.put(2.toByte()) // Number of FATs (2)
+        buf.putShort(reservedSectors.toShort()) // Reserved sector count (32 sectors)
+        buf.put(numFats.toByte()) // Number of FATs (2)
         buf.putShort(0.toShort()) // Root directory entries (0 for FAT32)
         buf.putShort(0.toShort()) // Total sectors 16-bit (0 for FAT32)
         buf.put(0xF8.toByte()) // Media descriptor (Fixed disk)
         buf.putShort(0.toShort()) // Sectors per FAT 16-bit (0)
         buf.putShort(63.toShort()) // Sectors per track
         buf.putShort(255.toShort()) // Number of heads
-        buf.putInt(2048) // Hidden sectors (Start LBA offset)
-        buf.putInt(totalPartitionSectors.toInt()) // Total sectors 32-bit
+        buf.putInt(startLbaOffset) // Hidden sectors (Start LBA offset)
+        val partSec32 = (if (totalPartitionSectors > 0xFFFFFFFFL) 0xFFFFFFFFL else totalPartitionSectors).toInt()
+        buf.putInt(partSec32) // Total sectors 32-bit
 
         // FAT32 Extended BPB
-        val sectorsPerFat = ((totalPartitionSectors / sectorsPerCluster) * 4 / 512).coerceAtLeast(1024L).toInt()
         buf.putInt(sectorsPerFat) // Sectors per FAT 32-bit
         buf.putShort(0.toShort()) // Extended flags
         buf.putShort(0.toShort()) // Filesystem version (0.0)
@@ -57,6 +90,9 @@ object Fat32Formatter {
         vbr[510] = 0x55.toByte()
         vbr[511] = 0xAA.toByte()
 
+        // Backup VBR (Sector 6) is identical to VBR
+        val backupVbr = vbr.copyOf()
+
         // FSInfo Sector (512 bytes)
         val fsInfo = ByteArray(512)
         val fsBuf = ByteBuffer.wrap(fsInfo).order(ByteOrder.LITTLE_ENDIAN)
@@ -64,12 +100,126 @@ object Fat32Formatter {
         fsBuf.put(ByteArray(480)) // Reserved 480 bytes
         fsBuf.position(484)
         fsBuf.putInt(0x61417272) // Struct signature ("rrAa")
-        val freeClusters = ((totalPartitionSectors - 32 - (sectorsPerFat * 2)) / sectorsPerCluster).toInt()
+        val dataSectors = totalPartitionSectors - reservedSectors - (sectorsPerFat.toLong() * numFats)
+        val freeClusters = (dataSectors / sectorsPerCluster).coerceAtLeast(0L).toInt()
         fsBuf.putInt(freeClusters) // Free cluster count
-        fsBuf.putInt(3) // Next free cluster
+        fsBuf.putInt(3) // Next free cluster (Root dir occupies cluster 2)
         fsInfo[510] = 0x55.toByte()
         fsInfo[511] = 0xAA.toByte()
 
-        return Pair(vbr, fsInfo)
+        val backupFsInfo = fsInfo.copyOf()
+
+        // Initial FAT Table Sector (First sector of FAT1 & FAT2)
+        // Cluster 0: 0x0FFFFFF8, Cluster 1: 0xFFFFFFFF, Cluster 2 (Root directory EOF): 0x0FFFFFFF
+        val initialFat = ByteArray(512)
+        val fatBuf = ByteBuffer.wrap(initialFat).order(ByteOrder.LITTLE_ENDIAN)
+        fatBuf.putInt(0x0FFFFFF8) // Media type in cluster 0
+        fatBuf.putInt(0xFFFFFFFF.toInt()) // End of cluster chain marker in cluster 1
+        fatBuf.putInt(0x0FFFFFFF) // Root directory EOF marker in cluster 2
+
+        // Initial Root Directory Sector (Volume label entry)
+        val rootDir = ByteArray(512)
+        val rootBuf = ByteBuffer.wrap(rootDir).order(ByteOrder.LITTLE_ENDIAN)
+        rootBuf.put(cleanLabel) // 11-byte volume label
+        rootBuf.put(0x08.toByte()) // Attribute: Volume Label (0x08)
+
+        return Fat32FormattedStructures(
+            vbr = vbr,
+            fsInfo = fsInfo,
+            backupVbr = backupVbr,
+            backupFsInfo = backupFsInfo,
+            initialFatSector = initialFat,
+            initialRootDirSector = rootDir,
+            reservedSectors = reservedSectors,
+            sectorsPerFat = sectorsPerFat,
+            sectorsPerCluster = sectorsPerCluster
+        )
+    }
+
+    /**
+     * Backward-compatible helper returning Pair(vbr, fsInfo).
+     */
+    fun createFat32BootSectors(
+        totalPartitionSectors: Long,
+        volumeLabel: String = "RUFUS",
+        sectorsPerCluster: Int = 8
+    ): Pair<ByteArray, ByteArray> {
+        val structures = createCompleteFat32Structures(totalPartitionSectors, volumeLabel, sectorsPerCluster)
+        return Pair(structures.vbr, structures.fsInfo)
+    }
+
+    /**
+     * Creates NTFS Volume Boot Record (512 bytes).
+     */
+    fun createNtfsBootSector(
+        totalPartitionSectors: Long,
+        volumeLabel: String = "RUFUS",
+        sectorsPerCluster: Int = 8,
+        startLbaOffset: Int = 2048
+    ): ByteArray {
+        val vbr = ByteArray(512)
+        val buf = ByteBuffer.wrap(vbr).order(ByteOrder.LITTLE_ENDIAN)
+        buf.put(byteArrayOf(0xEB.toByte(), 0x52.toByte(), 0x90.toByte())) // Jump
+        buf.put("NTFS    ".toByteArray(Charsets.US_ASCII)) // OEM ID
+        buf.putShort(512.toShort()) // Bytes per sector
+        buf.put(sectorsPerCluster.toByte()) // Sectors per cluster
+        buf.putShort(0.toShort()) // Reserved sectors
+        buf.put(0.toByte()) // Number of FATs
+        buf.putShort(0.toShort()) // Root dir entries
+        buf.putShort(0.toShort()) // Total sectors 16-bit
+        buf.put(0xF8.toByte()) // Media descriptor
+        buf.putShort(0.toShort()) // Sectors per FAT 16-bit
+        buf.putShort(63.toShort()) // Sectors per track
+        buf.putShort(255.toShort()) // Heads
+        buf.putInt(startLbaOffset) // Hidden sectors
+        buf.putInt(0) // Unused
+        buf.putInt(0x80.toInt()) // Unused
+        buf.putLong(totalPartitionSectors - 1L) // Total sectors 64-bit
+        buf.putLong(4L) // Start cluster for $MFT
+        buf.putLong(totalPartitionSectors / (2 * sectorsPerCluster)) // Start cluster for $MFTMirr
+        buf.put(0xF6.toByte()) // Clusters per file record segment
+        buf.put(ByteArray(3)) // Reserved
+        buf.put(0xF6.toByte()) // Clusters per index buffer
+        buf.put(ByteArray(3)) // Reserved
+        buf.putLong(0x1234567887654321L) // Volume Serial Number
+        vbr[510] = 0x55.toByte()
+        vbr[511] = 0xAA.toByte()
+        return vbr
+    }
+
+    /**
+     * Creates exFAT Volume Boot Record (512 bytes).
+     */
+    fun createExFatBootSector(
+        totalPartitionSectors: Long,
+        volumeLabel: String = "RUFUS",
+        sectorsPerCluster: Int = 8,
+        startLbaOffset: Int = 2048
+    ): ByteArray {
+        val vbr = ByteArray(512)
+        val buf = ByteBuffer.wrap(vbr).order(ByteOrder.LITTLE_ENDIAN)
+        buf.put(byteArrayOf(0xEB.toByte(), 0x76.toByte(), 0x90.toByte())) // Jump
+        buf.put("EXFAT   ".toByteArray(Charsets.US_ASCII)) // OEM ID
+        buf.put(ByteArray(53)) // Must be 0
+        buf.putLong(startLbaOffset.toLong()) // Partition offset
+        buf.putLong(totalPartitionSectors) // Volume length
+        buf.putInt(128) // FAT offset in sectors
+        val fatLen = ((totalPartitionSectors / sectorsPerCluster) * 4 / 512).coerceAtLeast(128L).toInt()
+        buf.putInt(fatLen) // FAT length
+        val clusterHeapOffset = 128 + (fatLen * 1)
+        buf.putInt(clusterHeapOffset) // Cluster heap offset
+        val clusterCount = ((totalPartitionSectors - clusterHeapOffset) / sectorsPerCluster).toInt()
+        buf.putInt(clusterCount) // Cluster count
+        buf.putInt(2) // First cluster of root dir
+        buf.putInt(0x12345678) // Volume Serial Number
+        buf.putShort(0x0100.toShort()) // File system revision
+        buf.putShort(0.toShort()) // Volume flags
+        buf.put(9.toByte()) // Bytes per sector shift (2^9 = 512)
+        buf.put(3.toByte()) // Sectors per cluster shift (2^3 = 8)
+        buf.put(1.toByte()) // Number of FATs
+        buf.put(0x80.toByte()) // Drive select
+        vbr[510] = 0x55.toByte()
+        vbr[511] = 0xAA.toByte()
+        return vbr
     }
 }

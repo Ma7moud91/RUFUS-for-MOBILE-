@@ -84,11 +84,15 @@ class RufusUsbManager(private val context: Context) {
 
     private fun isPotentialStorageDevice(device: UsbDevice): Boolean {
         try {
-            // Check interface classes
+            // Direct device class check (8 = USB Mass Storage)
+            if (device.deviceClass == 8) {
+                return true
+            }
+
+            // Inspect all interfaces for USB Mass Storage class (8)
             for (i in 0 until device.interfaceCount) {
                 try {
                     val usbInterface = device.getInterface(i)
-                    // Class 8 is USB Mass Storage
                     if (usbInterface.interfaceClass == 8) {
                         return true
                     }
@@ -96,10 +100,11 @@ class RufusUsbManager(private val context: Context) {
                     // Ignore interface access errors
                 }
             }
-            // Class 0 indicates class info is defined in interfaces, Class 8 is direct Mass Storage
-            return device.deviceClass == 0 || device.deviceClass == 8
+
+            // Non-storage composite devices (e.g. keyboards/mice/audio with deviceClass == 0) return false
+            return false
         } catch (e: Exception) {
-            return true // Fallback to including device safely
+            return false
         }
     }
 

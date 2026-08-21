@@ -47,7 +47,8 @@ object MbrGenerator {
         buffer.put(partitionType) // Partition type
         buffer.put(byteArrayOf(0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte())) // End CHS
         buffer.putInt(startLba) // Start LBA = 2048
-        val partitionSize = (totalSectors - startLba - 34).coerceAtLeast(1024L).toInt()
+        val rawSize = totalSectors - startLba
+        val partitionSize = (if (rawSize > 0xFFFFFFFFL) 0xFFFFFFFFL else rawSize.coerceAtLeast(1L)).toInt()
         buffer.putInt(partitionSize) // Size in sectors
 
         // Boot signature 0x55, 0xAA

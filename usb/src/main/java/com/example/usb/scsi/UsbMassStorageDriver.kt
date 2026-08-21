@@ -48,6 +48,11 @@ class UsbMassStorageDriver(
 
     fun open(): Boolean {
         try {
+            // Close any stale existing connection before opening anew
+            if (connection != null) {
+                close()
+            }
+
             if (!usbManager.hasPermission(usbDevice)) {
                 Log.e(TAG, "No USB Host permission granted for device: ${usbDevice.deviceName}")
                 return false
@@ -200,7 +205,7 @@ class UsbMassStorageDriver(
 
         val buffer = ByteArray(36)
         val read = receiveData(buffer)
-        val csw = receiveCsw()
+        val csw = receiveCsw(tag)
 
         if (csw?.isPassed == true && read >= 36) {
             vendorIdentification = String(buffer, 8, 8, Charsets.US_ASCII).trim()
@@ -222,7 +227,7 @@ class UsbMassStorageDriver(
             endpointOut?.let { clearEndpointHalt(it) }
             return false
         }
-        val csw = receiveCsw()
+        val csw = receiveCsw(tag)
         return csw?.isPassed == true
     }
 
@@ -240,7 +245,7 @@ class UsbMassStorageDriver(
 
         val buffer = ByteArray(18)
         val read = receiveData(buffer)
-        val csw = receiveCsw()
+        val csw = receiveCsw(tag)
 
         if (read >= 18 && csw != null) {
             val senseKey = buffer[2].toInt() and 0x0F
@@ -266,7 +271,7 @@ class UsbMassStorageDriver(
 
         val buffer = ByteArray(8)
         val readBytes = receiveData(buffer)
-        val csw = receiveCsw()
+        val csw = receiveCsw(tag)
 
         if (csw?.isPassed == true && readBytes >= 8) {
             val bb = ByteBuffer.wrap(buffer).order(ByteOrder.BIG_ENDIAN)
@@ -298,7 +303,7 @@ class UsbMassStorageDriver(
 
         val buffer = ByteArray(32)
         val readBytes = receiveData(buffer)
-        val csw = receiveCsw()
+        val csw = receiveCsw(tag)
 
         if (csw?.isPassed == true && readBytes >= 32) {
             val bb = ByteBuffer.wrap(buffer).order(ByteOrder.BIG_ENDIAN)
@@ -362,7 +367,7 @@ class UsbMassStorageDriver(
                     continue
                 }
 
-                val csw = receiveCsw()
+                val csw = receiveCsw(tag)
                 if (csw?.isPassed == true) {
                     success = true
                     break
@@ -384,40 +389,60 @@ class UsbMassStorageDriver(
 
     /**
      * Reads raw bytes from specified LBA sectors using SCSI READ (10).
-     * Includes automated BOT retry and sense clearing for high reliability.
+     * Chunked into safe buffers with automated BOT retry and sense clearing for high reliability.
      */
     fun readSectors(startLba: Long, sectorCount: Int): ByteArray? {
         val totalBytes = sectorCount * sectorSize
         val epOut = endpointOut ?: return null
+        val result = ByteArray(totalBytes)
 
-        for (retry in 0..2) {
-            val cdb = ByteBuffer.allocate(10).order(ByteOrder.BIG_ENDIAN)
-            cdb.put(ScsiConstants.READ_10)
-            cdb.put(0.toByte())
-            cdb.putInt(startLba.toInt())
-            cdb.put(0.toByte())
-            cdb.putShort(sectorCount.toShort())
-            cdb.put(0.toByte())
+        val maxSectorsPerBatch = SAFE_CHUNK_BYTES / sectorSize
+        var sectorOffset = 0
 
-            val tag = tagGenerator.getAndIncrement()
-            val cbw = ScsiCbw(tag, totalBytes, ScsiConstants.DIRECTION_IN, 0, cdb.array())
-            if (!sendCbw(cbw)) {
-                clearEndpointHalt(epOut)
-                continue
+        while (sectorOffset < sectorCount) {
+            val sectorsThisBatch = Math.min(sectorCount - sectorOffset, maxSectorsPerBatch)
+            val bytesThisBatch = sectorsThisBatch * sectorSize
+            val currentLba = startLba + sectorOffset
+            var batchSuccess = false
+
+            for (retry in 0..2) {
+                val cdb = ByteBuffer.allocate(10).order(ByteOrder.BIG_ENDIAN)
+                cdb.put(ScsiConstants.READ_10)
+                cdb.put(0.toByte())
+                cdb.putInt(currentLba.toInt())
+                cdb.put(0.toByte())
+                cdb.putShort(sectorsThisBatch.toShort())
+                cdb.put(0.toByte())
+
+                val tag = tagGenerator.getAndIncrement()
+                val cbw = ScsiCbw(tag, bytesThisBatch, ScsiConstants.DIRECTION_IN, 0, cdb.array())
+                if (!sendCbw(cbw)) {
+                    clearEndpointHalt(epOut)
+                    continue
+                }
+
+                val batchBuffer = ByteArray(bytesThisBatch)
+                val readBytes = receiveData(batchBuffer)
+                val csw = receiveCsw(tag)
+
+                if (csw?.isPassed == true && readBytes == bytesThisBatch) {
+                    System.arraycopy(batchBuffer, 0, result, sectorOffset * sectorSize, bytesThisBatch)
+                    batchSuccess = true
+                    break
+                } else {
+                    requestSense()
+                }
             }
 
-            val buffer = ByteArray(totalBytes)
-            val readBytes = receiveData(buffer)
-            val csw = receiveCsw()
-
-            if (csw?.isPassed == true && readBytes == totalBytes) {
-                return buffer
-            } else {
-                requestSense()
+            if (!batchSuccess) {
+                Log.e(TAG, "Failed reading sectors at LBA $currentLba after retries")
+                return null
             }
+
+            sectorOffset += sectorsThisBatch
         }
 
-        return null
+        return result
     }
 
     /**
@@ -428,7 +453,7 @@ class UsbMassStorageDriver(
         val tag = tagGenerator.getAndIncrement()
         val cbw = ScsiCbw(tag, 0, ScsiConstants.DIRECTION_OUT, 0, cdb)
         if (!sendCbw(cbw)) return false
-        val csw = receiveCsw()
+        val csw = receiveCsw(tag)
         return csw?.isPassed == true
     }
 
@@ -450,7 +475,7 @@ class UsbMassStorageDriver(
         return read
     }
 
-    private fun receiveCsw(): ScsiCsw? {
+    private fun receiveCsw(expectedTag: Int? = null): ScsiCsw? {
         val conn = connection ?: return null
         val epIn = endpointIn ?: return null
         val buffer = ByteArray(ScsiConstants.CSW_SIZE)
@@ -459,7 +484,12 @@ class UsbMassStorageDriver(
             clearEndpointHalt(epIn)
             return null
         }
-        return ScsiCsw.fromByteArray(buffer)
+        val csw = ScsiCsw.fromByteArray(buffer) ?: return null
+        if (expectedTag != null && csw.tag != expectedTag) {
+            Log.w(TAG, "CSW tag mismatch: expected $expectedTag, got ${csw.tag}")
+            return null
+        }
+        return csw
     }
 
     override fun close() {
