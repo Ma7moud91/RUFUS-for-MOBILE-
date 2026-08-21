@@ -20,7 +20,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withContext
-import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.MessageDigest
@@ -212,6 +211,14 @@ class RealRufusWriteEngineImpl(
                     logRepository.log("AutoUnattend: Failed to read GPT partition entries at LBA $partEntriesLba.", LogLevel.WARNING, "WIN-OOBE")
                     return false
                 }
+
+                // Verify 16-byte type GUID is not all-zero
+                val isGuidAllZero = (0 until 16).all { partEntries[it] == 0.toByte() }
+                if (isGuidAllZero) {
+                    logRepository.log("AutoUnattend: GPT partition entry 0 has empty type GUID (no partition found).", LogLevel.WARNING, "WIN-OOBE")
+                    return false
+                }
+
                 val entryBuf = ByteBuffer.wrap(partEntries).order(ByteOrder.LITTLE_ENDIAN)
                 partitionStartLba = entryBuf.getLong(32) // First LBA of partition 1
             } else {
@@ -236,6 +243,7 @@ class RealRufusWriteEngineImpl(
             }
 
             val vbrBuf = ByteBuffer.wrap(vbr).order(ByteOrder.LITTLE_ENDIAN)
+            val oemName = String(vbr, 3, 8, Charsets.US_ASCII)
             val bytesPerSector = vbrBuf.getShort(11).toInt() and 0xFFFF
             val sectorsPerCluster = vbr[13].toInt() and 0xFF
             val reservedSectors = vbrBuf.getShort(14).toInt() and 0xFFFF
@@ -244,9 +252,13 @@ class RealRufusWriteEngineImpl(
             val rootCluster = vbrBuf.getInt(44).toLong() and 0xFFFFFFFFL
             val fsInfoSectorOffset = vbrBuf.getShort(48).toInt() and 0xFFFF
 
+            val isOemKnown = oemName.startsWith("MSDOS") || oemName.startsWith("MSWIN") || oemName.startsWith("FAT32")
+            val isSectorSizeValid = (bytesPerSector == 512)
+            val oemOrSectorValid = isOemKnown || isSectorSizeValid
+
             // Validate FAT32 specifics
-            if (bytesPerSector != 512 || sectorsPerCluster == 0 || reservedSectors == 0 || numFats == 0 || sectorsPerFat32 == 0L || rootCluster < 2L) {
-                logRepository.log("AutoUnattend: Filesystem at LBA $partitionStartLba is not FAT32 (Bytes/Sec: $bytesPerSector, SPC: $sectorsPerCluster, Reserved: $reservedSectors, FATs: $numFats, FATSz: $sectorsPerFat32).", LogLevel.WARNING, "WIN-OOBE")
+            if (!oemOrSectorValid || bytesPerSector != 512 || sectorsPerCluster == 0 || reservedSectors == 0 || numFats == 0 || sectorsPerFat32 == 0L || rootCluster < 2L) {
+                logRepository.log("AutoUnattend: Filesystem at LBA $partitionStartLba is not FAT32 (OEM: '$oemName', Bytes/Sec: $bytesPerSector, SPC: $sectorsPerCluster, Reserved: $reservedSectors, FATs: $numFats, FATSz: $sectorsPerFat32).", LogLevel.WARNING, "WIN-OOBE")
                 return false
             }
 
@@ -262,11 +274,21 @@ class RealRufusWriteEngineImpl(
                 return false
             }
 
-            val fatSector = readSectorsWithRetry(driver, fat1StartLba, 1, emitProgress)
-            if (fatSector == null || fatSector.size < 512) {
+            val numFatSectorsToRead = Math.min(4L, sectorsPerFat32).toInt().coerceAtLeast(1)
+            val fatSectorsList = mutableListOf<ByteArray>()
+            for (s in 0 until numFatSectorsToRead) {
+                val sec = readSectorsWithRetry(driver, fat1StartLba + s, 1, emitProgress)
+                if (sec != null && sec.size >= 512) {
+                    fatSectorsList.add(sec)
+                }
+            }
+
+            if (fatSectorsList.isEmpty()) {
                 logRepository.log("AutoUnattend: Failed to read FAT sector at LBA $fat1StartLba.", LogLevel.WARNING, "WIN-OOBE")
                 return false
             }
+
+            val fatSector = fatSectorsList[0]
 
             val fsInfoLba = partitionStartLba + fsInfoSectorOffset
             val fsInfoSector = if (fsInfoSectorOffset > 0) {
@@ -275,17 +297,21 @@ class RealRufusWriteEngineImpl(
                 ByteArray(512)
             }
 
+            // Resolve start cluster safely using FSInfo or scanning FAT chain
+            val resolvedCluster = Fat32Formatter.resolveInjectionStartCluster(
+                fsInfoSector = if (fsInfoSectorOffset > 0) fsInfoSector else null,
+                fatSectors = fatSectorsList
+            )
+
+            if (resolvedCluster == null) {
+                logRepository.log("AutoUnattend: No free cluster found in FAT table.", LogLevel.WARNING, "WIN-OOBE")
+                return false
+            }
+            val startCluster = resolvedCluster
+
             // 4. Generate AutoUnattend.xml payload
             val unattendXml = WindowsUnattendGenerator.generateAutoUnattendXml(config.windowsUserExperience)
             val xmlBytes = unattendXml.toByteArray(Charsets.UTF_8)
-
-            // Determine next free cluster from FSInfo
-            var startCluster = 3
-            val fsInfoBuf = ByteBuffer.wrap(fsInfoSector).order(ByteOrder.LITTLE_ENDIAN)
-            val nextFreeFromFsInfo = fsInfoBuf.getInt(492)
-            if (nextFreeFromFsInfo >= 3) {
-                startCluster = nextFreeFromFsInfo
-            }
 
             val injected = Fat32Formatter.createRootDirectoryFile(
                 initialRootDirSector = rootDirSector,
@@ -320,6 +346,87 @@ class RealRufusWriteEngineImpl(
             }
         } catch (e: Exception) {
             logRepository.log("AutoUnattend injection encountered error: ${e.message}", LogLevel.WARNING, "WIN-OOBE")
+            return false
+        }
+    }
+
+    private suspend fun verifyWrittenData(
+        driver: UsbMassStorageDriver,
+        config: WriteConfig,
+        verifyStartLba: Long,
+        bytesWritten: Long,
+        sourceSha256Calculated: String,
+        emitProgress: suspend (WriteProgress) -> Unit
+    ): Boolean {
+        if (!config.verifySha256AfterBurn || bytesWritten <= 0L) {
+            logRepository.log("Physical USB flashing complete. Partition table and boot structures verified.", LogLevel.INFO, "WRITE")
+            return true
+        }
+
+        logRepository.log("================ STARTING SHA-256 POST-BURN VERIFICATION ================", LogLevel.INFO, "VERIFY")
+        logRepository.log("Reading back written payload sectors from target USB drive (LBA $verifyStartLba)...", LogLevel.INFO, "VERIFY")
+        emitProgress(WriteProgress.Verifying(percentage = 0, message = "Starting SHA-256 checksum verification..."))
+
+        val expectedSourceSha256 = if (config.sourceSha256.isNotEmpty()) {
+            config.sourceSha256
+        } else {
+            sourceSha256Calculated
+        }
+        logRepository.log("Source SHA-256      : $expectedSourceSha256", LogLevel.INFO, "VERIFY")
+
+        val usbSha256Digest = MessageDigest.getInstance("SHA-256")
+        var verifyLba = verifyStartLba
+        val totalVerifySectors = (bytesWritten + driver.sectorSize - 1) / driver.sectorSize
+        val chunkSectors = (64 * 1024 / driver.sectorSize).coerceAtLeast(1)
+        var sectorsReadBack = 0L
+        val verifyStartTime = System.currentTimeMillis()
+
+        while (sectorsReadBack < totalVerifySectors && !isCancelled.get()) {
+            val sectorsToRead = Math.min(totalVerifySectors - sectorsReadBack, chunkSectors.toLong()).toInt()
+            val readBuffer = readSectorsWithRetry(driver, verifyLba, sectorsToRead, emitProgress)
+
+            if (readBuffer != null) {
+                val validLen = if (sectorsReadBack + sectorsToRead >= totalVerifySectors) {
+                    val remainingBytes = (bytesWritten - sectorsReadBack * driver.sectorSize).toInt()
+                    if (remainingBytes in 1..readBuffer.size) remainingBytes else readBuffer.size
+                } else {
+                    readBuffer.size
+                }
+                usbSha256Digest.update(readBuffer, 0, validLen)
+            } else {
+                logRepository.log("Warning: Sector read retry at LBA $verifyLba during verification.", LogLevel.WARNING, "VERIFY")
+            }
+
+            sectorsReadBack += sectorsToRead
+            verifyLba += sectorsToRead
+
+            val verifyPct = ((sectorsReadBack.toDouble() / totalVerifySectors.coerceAtLeast(1L)) * 100).toInt().coerceIn(0, 100)
+            val verifyElapsedSec = ((System.currentTimeMillis() - verifyStartTime) / 1000.0).coerceAtLeast(0.1)
+            val verifySpeed = ((sectorsReadBack * driver.sectorSize) / (1024.0 * 1024.0)) / verifyElapsedSec
+
+            emitProgress(
+                WriteProgress.Verifying(
+                    percentage = verifyPct,
+                    message = "Verifying SHA-256 against image: $verifyPct% @ ${String.format("%.1f", verifySpeed)} MB/s"
+                )
+            )
+        }
+
+        if (isCancelled.get()) {
+            emitCancelled()
+            return false
+        }
+
+        val calculatedUsbSha256 = usbSha256Digest.digest().joinToString("") { "%02x".format(it) }
+        logRepository.log("Target USB SHA-256  : $calculatedUsbSha256", LogLevel.INFO, "VERIFY")
+
+        val matches = expectedSourceSha256.isEmpty() || expectedSourceSha256.equals(calculatedUsbSha256, ignoreCase = true)
+        if (matches) {
+            logRepository.log("✓ SHA-256 VERIFICATION PASSED: Data written to USB matches source image exactly (Bit-for-Bit Verified: $calculatedUsbSha256)", LogLevel.SUCCESS, "VERIFY")
+            return true
+        } else {
+            logRepository.log("✕ ERROR: SHA-256 Checksum Mismatch! Source: $expectedSourceSha256 != Target USB: $calculatedUsbSha256", LogLevel.ERROR, "VERIFY")
+            emitProgress(WriteProgress.Error(message = "SHA-256 verification failed: Target USB checksum does not match source image!"))
             return false
         }
     }
@@ -388,35 +495,38 @@ class RealRufusWriteEngineImpl(
 
             // 1. Bad Blocks Verification if requested (quick non-destructive read-verify pass)
             if (config.badBlocks.enabled) {
-                val passes = config.badBlocks.passes.coerceAtLeast(1)
-                val sectorsToScan = (preflightPayloadSize / driver.sectorSize).coerceIn(2048L, driver.totalSectors)
-                logRepository.log("Executing SCSI media surface check ($passes passes) on $sectorsToScan sectors...", LogLevel.WARNING, "BADBLOCKS")
-                val chunkSectors = (64 * 1024 / driver.sectorSize).coerceAtLeast(1)
+                val rawSectors = preflightPayloadSize / driver.sectorSize
+                val sectorsToScan = rawSectors.coerceAtLeast(2048L).coerceAtMost(driver.totalSectors)
 
-                for (p in 1..passes) {
-                    var scannedSectors = 0L
-                    while (scannedSectors < sectorsToScan && !isCancelled.get()) {
-                        val count = Math.min(sectorsToScan - scannedSectors, chunkSectors.toLong()).toInt()
-                        val currentLba = scannedSectors
-                        val readBuffer = readSectorsWithRetry(driver, currentLba, count, emitProgress)
-                        if (readBuffer == null) {
-                            logRepository.log("SCSI Surface Scan: Bad block detected at LBA $currentLba!", LogLevel.ERROR, "BADBLOCKS")
-                            emitProgress(WriteProgress.Error(message = "Bad block detected at LBA $currentLba during media surface scan."))
-                            return
+                if (sectorsToScan > 0L) {
+                    val passes = config.badBlocks.passes.coerceAtLeast(1)
+                    logRepository.log("Executing SCSI media surface check ($passes passes) on $sectorsToScan sectors...", LogLevel.WARNING, "BADBLOCKS")
+                    val chunkSectors = (64 * 1024 / driver.sectorSize).coerceAtLeast(1)
+
+                    for (p in 1..passes) {
+                        var scannedSectors = 0L
+                        while (scannedSectors < sectorsToScan && !isCancelled.get()) {
+                            val count = Math.min(sectorsToScan - scannedSectors, chunkSectors.toLong()).toInt()
+                            val currentLba = scannedSectors
+                            val readBuffer = readSectorsWithRetry(driver, currentLba, count, emitProgress)
+                            if (readBuffer == null) {
+                                logRepository.log("SCSI Surface Scan: Bad block detected at LBA $currentLba!", LogLevel.ERROR, "BADBLOCKS")
+                                emitProgress(WriteProgress.Error(message = "Bad block detected at LBA $currentLba during media surface scan."))
+                                return
+                            }
+                            scannedSectors += count
+                            val pct = ((scannedSectors.toDouble() / sectorsToScan) * 100).toInt().coerceIn(0, 100)
+                            emitProgress(WriteProgress.Analyzing(message = "SCSI media surface scan pass $p/$passes ($pct%)..."))
                         }
-                        scannedSectors += count
-                        val pct = ((scannedSectors.toDouble() / sectorsToScan) * 100).toInt().coerceIn(0, 100)
-                        emitProgress(WriteProgress.Analyzing(message = "SCSI media surface scan pass $p/$passes ($pct%)..."))
+                        if (isCancelled.get()) { emitCancelled(); return }
                     }
-                    if (isCancelled.get()) { emitCancelled(); return }
+                    logRepository.log("SCSI Surface Scan: 0 bad sectors detected across $sectorsToScan sectors.", LogLevel.SUCCESS, "BADBLOCKS")
                 }
-                logRepository.log("SCSI Surface Scan: 0 bad sectors detected across $sectorsToScan sectors.", LogLevel.SUCCESS, "BADBLOCKS")
             }
 
             var bytesWritten = 0L
             var verifyStartLba = 0L
             val sourceSha256Digest = MessageDigest.getInstance("SHA-256")
-            var unattendInjected = false
 
             if (config.bootSelectionType == BootSelectionType.ISO_IMAGE) {
                 // TRUE RAW / DD ISO WRITE MODE: Flashes verbatim image byte-for-byte starting at LBA 0
@@ -523,15 +633,33 @@ class RealRufusWriteEngineImpl(
 
                 if (isCancelled.get()) { emitCancelled(); return }
 
-                // AutoUnattend.xml injection into flashed Windows ISO
+                val sourceSha256Calculated = sourceSha256Digest.digest().joinToString("") { "%02x".format(it) }
+
+                // Post-Burn SHA-256 Checksum Verification BEFORE AutoUnattend injection
+                val verified = verifyWrittenData(
+                    driver = driver,
+                    config = config,
+                    verifyStartLba = verifyStartLba,
+                    bytesWritten = bytesWritten,
+                    sourceSha256Calculated = sourceSha256Calculated,
+                    emitProgress = emitProgress
+                )
+                if (!verified) return
+
+                // AutoUnattend.xml injection into flashed Windows ISO AFTER verification
                 if (config.isWindowsImage || config.bootSelectionType == BootSelectionType.WINDOWS_TO_GO) {
-                    unattendInjected = injectUnattendIntoFlashedImage(driver, config, emitProgress)
+                    val unattendInjected = injectUnattendIntoFlashedImage(driver, config, emitProgress)
+                    if (unattendInjected) {
+                        logRepository.log("Windows 11 OOBE/Bypass configurations committed to boot volume.", LogLevel.SUCCESS, "WIN-OOBE")
+                    } else {
+                        logRepository.log("AutoUnattend.xml not injected (unsupported filesystem on image).", LogLevel.WARNING, "WIN-OOBE")
+                    }
                 }
             } else {
                 // NON-ISO BOOT MODE: Partitioning + Formatting + Bootloader Installation
                 if (config.fileSystem != FileSystem.FAT32 && config.fileSystem != FileSystem.FAT) {
-                    logRepository.log("ERROR: ${config.fileSystem.label} formatting is not yet supported for non-ISO mode.", LogLevel.ERROR, "FORMAT")
-                    emitProgress(WriteProgress.Error(message = "exFAT/NTFS formatting is not yet supported for non-ISO mode. Please choose FAT32."))
+                    logRepository.log("ERROR: Only FAT32 is supported for non-ISO mode. ${config.fileSystem.label} is not supported.", LogLevel.ERROR, "FORMAT")
+                    emitProgress(WriteProgress.Error(message = "Only FAT32 is supported for non-ISO mode. Please choose FAT32."))
                     return
                 }
 
@@ -634,7 +762,6 @@ class RealRufusWriteEngineImpl(
                     val cluster3Lba = rootDirLba + fatStructures.sectorsPerCluster
                     writeSectorsWithRetry(driver, cluster3Lba, xmlBytes, emitProgress)
                     logRepository.log("AutoUnattend.xml (${xmlBytes.size} bytes) written across $clustersInjected cluster(s) starting at LBA $cluster3Lba.", LogLevel.SUCCESS, "WIN-OOBE")
-                    unattendInjected = true
                 }
 
                 writeSectorsWithRetry(driver, startPartitionLba, fatStructures.vbr, emitProgress)
@@ -691,97 +818,33 @@ class RealRufusWriteEngineImpl(
                         totalBytes = bytesWritten
                     )
                 )
+
+                if (isCancelled.get()) { emitCancelled(); return }
+
+                val sourceSha256Calculated = sourceSha256Digest.digest().joinToString("") { "%02x".format(it) }
+
+                // Post-Burn SHA-256 Checksum Verification for Non-ISO payload
+                val verified = verifyWrittenData(
+                    driver = driver,
+                    config = config,
+                    verifyStartLba = verifyStartLba,
+                    bytesWritten = bytesWritten,
+                    sourceSha256Calculated = sourceSha256Calculated,
+                    emitProgress = emitProgress
+                )
+                if (!verified) return
             }
 
             if (isCancelled.get()) { emitCancelled(); return }
 
-            val sourceSha256Calculated = sourceSha256Digest.digest().joinToString("") { "%02x".format(it) }
-
-            // 6. Windows User Experience Customization Note
-            if (config.isWindowsImage || config.bootSelectionType == BootSelectionType.WINDOWS_TO_GO) {
-                if (unattendInjected) {
-                    logRepository.log("Windows 11 OOBE/Bypass configurations committed to boot volume.", LogLevel.SUCCESS, "WIN-OOBE")
-                } else {
-                    logRepository.log("AutoUnattend.xml not injected (unsupported filesystem on image).", LogLevel.WARNING, "WIN-OOBE")
-                }
-            }
-
-            // 7. Flush Hardware Flash Caches
+            // Flush Hardware Flash Caches once after all writes complete
             emitProgress(WriteProgress.InstallingBootloader(percentage = 100, bootloaderType = "Synchronizing SCSI hardware cache to NAND flash..."))
             withContext(Dispatchers.IO) {
                 driver.synchronizeCache()
             }
             logRepository.log("SCSI SYNCHRONIZE CACHE confirmed: All dirty blocks committed to hardware flash.", LogLevel.SUCCESS, "HARDWARE")
 
-            // 8. Post-Burn SHA-256 Checksum Verification
-            if (config.verifySha256AfterBurn && bytesWritten > 0L) {
-                logRepository.log("================ STARTING SHA-256 POST-BURN VERIFICATION ================", LogLevel.INFO, "VERIFY")
-                logRepository.log("Reading back written payload sectors from target USB drive (LBA $verifyStartLba)...", LogLevel.INFO, "VERIFY")
-                emitProgress(WriteProgress.Verifying(percentage = 0, message = "Starting SHA-256 checksum verification..."))
-
-                val expectedSourceSha256 = if (config.sourceSha256.isNotEmpty()) {
-                    config.sourceSha256
-                } else {
-                    sourceSha256Calculated
-                }
-                logRepository.log("Source SHA-256      : $expectedSourceSha256", LogLevel.INFO, "VERIFY")
-
-                val usbSha256Digest = MessageDigest.getInstance("SHA-256")
-                var verifyLba = verifyStartLba
-                val totalVerifySectors = (bytesWritten + driver.sectorSize - 1) / driver.sectorSize
-                val chunkSectors = (64 * 1024 / driver.sectorSize).coerceAtLeast(1)
-                var sectorsReadBack = 0L
-                val verifyStartTime = System.currentTimeMillis()
-
-                while (sectorsReadBack < totalVerifySectors && !isCancelled.get()) {
-                    val sectorsToRead = Math.min(totalVerifySectors - sectorsReadBack, chunkSectors.toLong()).toInt()
-                    val readBuffer = readSectorsWithRetry(driver, verifyLba, sectorsToRead, emitProgress)
-
-                    if (readBuffer != null) {
-                        val validLen = if (sectorsReadBack + sectorsToRead >= totalVerifySectors) {
-                            val remainingBytes = (bytesWritten - sectorsReadBack * driver.sectorSize).toInt()
-                            if (remainingBytes in 1..readBuffer.size) remainingBytes else readBuffer.size
-                        } else {
-                            readBuffer.size
-                        }
-                        usbSha256Digest.update(readBuffer, 0, validLen)
-                    } else {
-                        logRepository.log("Warning: Sector read retry at LBA $verifyLba during verification.", LogLevel.WARNING, "VERIFY")
-                    }
-
-                    sectorsReadBack += sectorsToRead
-                    verifyLba += sectorsToRead
-
-                    val verifyPct = ((sectorsReadBack.toDouble() / totalVerifySectors.coerceAtLeast(1L)) * 100).toInt().coerceIn(0, 100)
-                    val verifyElapsedSec = ((System.currentTimeMillis() - verifyStartTime) / 1000.0).coerceAtLeast(0.1)
-                    val verifySpeed = ((sectorsReadBack * driver.sectorSize) / (1024.0 * 1024.0)) / verifyElapsedSec
-
-                    emitProgress(
-                        WriteProgress.Verifying(
-                            percentage = verifyPct,
-                            message = "Verifying SHA-256 against image: $verifyPct% @ ${String.format("%.1f", verifySpeed)} MB/s"
-                        )
-                    )
-                }
-
-                if (isCancelled.get()) { emitCancelled(); return }
-
-                val calculatedUsbSha256 = usbSha256Digest.digest().joinToString("") { "%02x".format(it) }
-                logRepository.log("Target USB SHA-256  : $calculatedUsbSha256", LogLevel.INFO, "VERIFY")
-
-                val matches = expectedSourceSha256.isEmpty() || expectedSourceSha256.equals(calculatedUsbSha256, ignoreCase = true)
-                if (matches) {
-                    logRepository.log("✓ SHA-256 VERIFICATION PASSED: Data written to USB matches source image exactly (Bit-for-Bit Verified: $calculatedUsbSha256)", LogLevel.SUCCESS, "VERIFY")
-                } else {
-                    logRepository.log("✕ ERROR: SHA-256 Checksum Mismatch! Source: $expectedSourceSha256 != Target USB: $calculatedUsbSha256", LogLevel.ERROR, "VERIFY")
-                    emitProgress(WriteProgress.Error(message = "SHA-256 verification failed: Target USB checksum does not match source image!"))
-                    return
-                }
-            } else {
-                logRepository.log("Physical USB flashing complete. Partition table and boot structures verified.", LogLevel.INFO, "WRITE")
-            }
-
-            // 9. Completion
+            // Completion
             val totalTimeSec = ((System.currentTimeMillis() - startTime) / 1000).coerceAtLeast(1)
             val avgSpeed = (bytesWritten / (1024.0 * 1024.0)) / totalTimeSec
             logRepository.log("SUCCESS: Real hardware flashing completed in $totalTimeSec seconds (${String.format("%.1f", avgSpeed)} MB/s average).", LogLevel.SUCCESS, "RUFUS")

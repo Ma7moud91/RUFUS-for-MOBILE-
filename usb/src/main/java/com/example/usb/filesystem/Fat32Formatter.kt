@@ -218,6 +218,51 @@ object Fat32Formatter {
     }
 
     /**
+     * Resolves the start cluster for file injection in FAT32:
+     * 1. Validates FSInfo sector signatures (0x41615252 at 0, 0x61417272 at 484, 0x55AA at 510).
+     *    If valid and offset 492 has a valid cluster pointer (>= 3 and != 0xFFFFFFFF), returns it.
+     * 2. If FSInfo is missing/invalid, scans the provided FAT sector(s) for the first free cluster
+     *    (entry == 0x00000000) starting at cluster index 3.
+     * 3. Returns null if no free cluster is found.
+     */
+    fun resolveInjectionStartCluster(
+        fsInfoSector: ByteArray?,
+        fatSectors: List<ByteArray>
+    ): Int? {
+        if (fsInfoSector != null && fsInfoSector.size >= 512) {
+            val fsBuf = ByteBuffer.wrap(fsInfoSector).order(ByteOrder.LITTLE_ENDIAN)
+            val leadSig = fsBuf.getInt(0)
+            val structSig = fsBuf.getInt(484)
+            val trailSig0 = fsInfoSector[510].toInt() and 0xFF
+            val trailSig1 = fsInfoSector[511].toInt() and 0xFF
+            val isTrailValid = (trailSig0 == 0x55 && trailSig1 == 0xAA)
+            if (leadSig == 0x41615252 && structSig == 0x61417272 && isTrailValid) {
+                val nextFree = fsBuf.getInt(492)
+                if (nextFree >= 3 && nextFree != -1 && nextFree != 0xFFFFFFFF.toInt()) {
+                    return nextFree
+                }
+            }
+        }
+
+        // Fallback: Scan FAT sector(s) for the first free cluster entry (0x00000000) starting at cluster 3
+        var clusterIndex = 0
+        for (fatSector in fatSectors) {
+            val fatBuf = ByteBuffer.wrap(fatSector).order(ByteOrder.LITTLE_ENDIAN)
+            val entriesInSector = fatSector.size / 4
+            for (i in 0 until entriesInSector) {
+                val currentCluster = clusterIndex + i
+                val entryValue = fatBuf.getInt(i * 4) and 0x0FFFFFFF
+                if (currentCluster >= 3 && entryValue == 0) {
+                    return currentCluster
+                }
+            }
+            clusterIndex += entriesInSector
+        }
+
+        return null
+    }
+
+    /**
      * Backward-compatible Pair helper.
      */
     fun createRootDirectoryFile(
