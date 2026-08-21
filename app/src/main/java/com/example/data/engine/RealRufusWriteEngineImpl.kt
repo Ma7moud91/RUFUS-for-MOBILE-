@@ -216,12 +216,17 @@ class RealRufusWriteEngineImpl(
                 }
             }
 
-            val requiredCapacityBytes = (startPartitionLba * driver.sectorSize) + preflightPayloadSize
+            val requiredCapacityBytes = if (config.bootSelectionType == BootSelectionType.ISO_IMAGE) {
+                preflightPayloadSize
+            } else {
+                (startPartitionLba * driver.sectorSize) + preflightPayloadSize
+            }
+
             if (preflightPayloadSize > 0L && requiredCapacityBytes > driver.totalCapacityBytes) {
                 val payloadMb = (preflightPayloadSize + 1024 * 1024 - 1) / (1024 * 1024)
                 val driveMb = driver.totalCapacityBytes / (1024 * 1024)
-                logRepository.log("CRITICAL ERROR: Payload image ($payloadMb MB) exceeds target USB capacity ($driveMb MB). Aborting before write.", LogLevel.ERROR, "HARDWARE")
-                emitProgress(WriteProgress.Error("Selected ISO image ($payloadMb MB) is too large for target USB drive ($driveMb MB). Please select a larger USB flash drive."))
+                logRepository.log("CRITICAL ERROR: Payload size ($payloadMb MB) exceeds target USB capacity ($driveMb MB). Aborting before write.", LogLevel.ERROR, "HARDWARE")
+                emitProgress(WriteProgress.Error("Selected image ($payloadMb MB) is too large for target USB drive ($driveMb MB). Please select a larger USB flash drive."))
                 return
             }
 
@@ -239,279 +244,276 @@ class RealRufusWriteEngineImpl(
                 logRepository.log("SCSI Surface Scan: 0 bad sectors detected.", LogLevel.SUCCESS, "BADBLOCKS")
             }
 
-            // 2. Zeroing initial & backup partition tables
-            logRepository.log("Zeroing initial and backup partition sectors...", LogLevel.INFO, "PARTITION")
-            emitProgress(WriteProgress.Partitioning(15, "Zeroing partition sectors..."))
+            var bytesWritten = 0L
+            var verifyStartLba = 0L
+            val sourceSha256Digest = MessageDigest.getInstance("SHA-256")
 
-            val zeroSectorChunk = ByteArray(driver.sectorSize * 34)
-            writeSectorsWithRetry(driver, 0, zeroSectorChunk, emitProgress)
-            if (driver.totalSectors > 68) {
-                writeSectorsWithRetry(driver, driver.totalSectors - 34, zeroSectorChunk, emitProgress)
-            }
+            if (config.bootSelectionType == BootSelectionType.ISO_IMAGE) {
+                // TRUE RAW / DD ISO WRITE MODE: Flashes verbatim image byte-for-byte starting at LBA 0
+                logRepository.log("Flashing bootable ISO image in raw DD mode starting at LBA 0...", LogLevel.INFO, "WRITE")
+                emitProgress(WriteProgress.Writing(0, "Opening ISO stream...", 0.0, 0L, 0L, preflightPayloadSize))
 
-            // 3. Partitioning: Writing MBR or GPT
-            logRepository.log("Creating ${config.partitionScheme.label} partition table...", LogLevel.INFO, "PARTITION")
-            emitProgress(WriteProgress.Partitioning(50, "Writing ${config.partitionScheme.label} partition headers..."))
-
-            val isEsp = (config.bootSelectionType == BootSelectionType.UEFI_SHELL || config.targetSystem == TargetSystem.UEFI_NON_CSM)
-
-            if (config.partitionScheme == PartitionScheme.GPT) {
-                val pmbr = MbrGenerator.createProtectiveMbr(driver.totalSectors)
-                val gptStructures = GptGenerator.createCompleteGptStructures(
-                    totalSectors = driver.totalSectors,
-                    volumeLabel = config.volumeLabel,
-                    isEfiEsp = isEsp
-                )
-
-                val gptWritten = writeSectorsWithRetry(driver, 0, pmbr, emitProgress) &&
-                                 writeSectorsWithRetry(driver, 1, gptStructures.primaryHeader, emitProgress) &&
-                                 writeSectorsWithRetry(driver, 2, gptStructures.primaryEntryArray, emitProgress) &&
-                                 writeSectorsWithRetry(driver, driver.totalSectors - 33, gptStructures.backupEntryArray, emitProgress) &&
-                                 writeSectorsWithRetry(driver, driver.totalSectors - 1, gptStructures.backupHeader, emitProgress)
-
-                if (!gptWritten) {
-                    logRepository.log("Failed to write Primary/Backup GPT partition headers to physical flash media.", LogLevel.ERROR, "PARTITION")
-                    emitProgress(WriteProgress.Error("Hardware GPT partition write failed at LBA 0..33"))
-                    return
-                }
-                logRepository.log("Written Protective MBR (LBA 0), Primary GPT (LBA 1..33), and Backup GPT (LBA ${driver.totalSectors - 33}..${driver.totalSectors - 1}).", LogLevel.SUCCESS, "PARTITION")
-            } else {
-                val partitionType = when (config.fileSystem) {
-                    FileSystem.FAT32, FileSystem.FAT -> MbrGenerator.PARTITION_TYPE_FAT32_LBA
-                    FileSystem.NTFS, FileSystem.EXFAT -> MbrGenerator.PARTITION_TYPE_NTFS_EXFAT
-                    FileSystem.EXT4, FileSystem.EXT2, FileSystem.EXT3 -> MbrGenerator.PARTITION_TYPE_LINUX_NATIVE
-                    else -> MbrGenerator.PARTITION_TYPE_FAT32_LBA
-                }
-                val mbr = MbrGenerator.createStandardMbr(
-                    partitionType = partitionType,
-                    startLba = startPartitionLba.toInt(),
-                    totalSectors = driver.totalSectors,
-                    isBootable = true
-                )
-                val mbrWritten = writeSectorsWithRetry(driver, 0, mbr, emitProgress)
-                if (!mbrWritten) {
-                    logRepository.log("Failed to write Standard MBR to physical flash media.", LogLevel.ERROR, "PARTITION")
-                    emitProgress(WriteProgress.Error("Hardware MBR write failed at LBA 0"))
-                    return
-                }
-                logRepository.log("Written Standard Master Boot Record (LBA 0).", LogLevel.SUCCESS, "PARTITION")
-            }
-            emitProgress(WriteProgress.Partitioning(100, "Partition table created."))
-
-            // 4. Formatting primary partition
-            logRepository.log("Formatting primary partition with ${config.fileSystem.label} (Cluster: ${config.clusterSize} B)...", LogLevel.INFO, "FORMAT")
-            emitProgress(WriteProgress.Formatting(40, "Writing Volume Boot Record & filesystem structures..."))
-
-            val totalPartitionSectors = (driver.totalSectors - startPartitionLba).coerceAtLeast(1024L)
-            var startDataLba = startPartitionLba + 32L
-            val sectorsPerCluster = (config.clusterSize / driver.sectorSize).coerceAtLeast(1)
-
-            when (config.fileSystem) {
-                FileSystem.FAT32, FileSystem.FAT -> {
-                    val fatStructures = Fat32Formatter.createCompleteFat32Structures(
-                        totalPartitionSectors = totalPartitionSectors,
-                        volumeLabel = config.volumeLabel,
-                        sectorsPerCluster = sectorsPerCluster,
-                        startLbaOffset = startPartitionLba.toInt()
-                    )
-
-                    var rootDirSector = fatStructures.initialRootDirSector
-                    var fatTableSector = fatStructures.initialFatSector
-                    val rootDirLba = startPartitionLba + fatStructures.reservedSectors + (fatStructures.sectorsPerFat.toLong() * 2)
-
-                    // Inject AutoUnattend.xml into FAT32 root directory & FAT table if Windows customization requested
-                    if (config.isWindowsImage || config.bootSelectionType == BootSelectionType.WINDOWS_TO_GO) {
-                        logRepository.log("Creating FAT32 directory entry for AutoUnattend.xml...", LogLevel.INFO, "WIN-OOBE")
-                        val unattendXml = WindowsUnattendGenerator.generateAutoUnattendXml(config.windowsUserExperience)
-                        val xmlBytes = unattendXml.toByteArray(Charsets.UTF_8)
-                        val injected = Fat32Formatter.createRootDirectoryFile(
-                            initialRootDirSector = rootDirSector,
-                            initialFatSector = fatTableSector,
-                            rootDirLba = rootDirLba,
-                            sectorsPerCluster = fatStructures.sectorsPerCluster,
-                            fileName83 = "AUTOUNATXML",
-                            fileContent = xmlBytes,
-                            startCluster = 3
-                        )
-                        rootDirSector = injected.first
-                        fatTableSector = injected.second
-
-                        // Write actual AutoUnattend.xml content to Cluster 3
-                        val cluster3Lba = rootDirLba + fatStructures.sectorsPerCluster
-                        writeSectorsWithRetry(driver, cluster3Lba, xmlBytes, emitProgress)
-                        logRepository.log("AutoUnattend.xml (${xmlBytes.size} bytes) written to FAT32 Cluster 3 (LBA $cluster3Lba).", LogLevel.SUCCESS, "WIN-OOBE")
-                    }
-
-                    writeSectorsWithRetry(driver, startPartitionLba, fatStructures.vbr, emitProgress)
-                    writeSectorsWithRetry(driver, startPartitionLba + 1, fatStructures.fsInfo, emitProgress)
-                    writeSectorsWithRetry(driver, startPartitionLba + 6, fatStructures.backupVbr, emitProgress)
-                    writeSectorsWithRetry(driver, startPartitionLba + 7, fatStructures.backupFsInfo, emitProgress)
-                    writeSectorsWithRetry(driver, startPartitionLba + fatStructures.reservedSectors, fatTableSector, emitProgress)
-                    writeSectorsWithRetry(driver, startPartitionLba + fatStructures.reservedSectors + fatStructures.sectorsPerFat, fatTableSector, emitProgress)
-                    writeSectorsWithRetry(driver, rootDirLba, rootDirSector, emitProgress)
-
-                    // Data payload starts at Cluster 4 (after root dir at cluster 2 and AutoUnattend at cluster 3)
-                    startDataLba = rootDirLba + (fatStructures.sectorsPerCluster.toLong() * 2)
-                    logRepository.log("FAT32 filesystem initialized (VBR, FSInfo, Backups, FAT tables, and Root Directory created).", LogLevel.SUCCESS, "FORMAT")
-                }
-                FileSystem.NTFS -> {
-                    val ntfsVbr = Fat32Formatter.createNtfsBootSector(
-                        totalPartitionSectors = totalPartitionSectors,
-                        volumeLabel = config.volumeLabel,
-                        sectorsPerCluster = sectorsPerCluster,
-                        startLbaOffset = startPartitionLba.toInt()
-                    )
-                    writeSectorsWithRetry(driver, startPartitionLba, ntfsVbr, emitProgress)
-                    startDataLba = startPartitionLba + (16L * sectorsPerCluster)
-                    logRepository.log("NTFS Volume Boot Record created at LBA $startPartitionLba (Data LBA $startDataLba).", LogLevel.SUCCESS, "FORMAT")
-                }
-                FileSystem.EXFAT -> {
-                    val exFatVbr = Fat32Formatter.createExFatBootSector(
-                        totalPartitionSectors = totalPartitionSectors,
-                        volumeLabel = config.volumeLabel,
-                        sectorsPerCluster = sectorsPerCluster,
-                        startLbaOffset = startPartitionLba.toInt()
-                    )
-                    writeSectorsWithRetry(driver, startPartitionLba, exFatVbr, emitProgress)
-                    val fatLen = ((totalPartitionSectors / sectorsPerCluster) * 4 / 512).coerceAtLeast(128L).toInt()
-                    val clusterHeapOffset = 128 + fatLen
-                    startDataLba = startPartitionLba + clusterHeapOffset
-                    logRepository.log("exFAT Volume Boot Record created at LBA $startPartitionLba (Data Heap LBA $startDataLba).", LogLevel.SUCCESS, "FORMAT")
-                }
-                FileSystem.EXT4, FileSystem.EXT2, FileSystem.EXT3 -> {
-                    startDataLba = startPartitionLba + 32L
-                    logRepository.log("Linux Ext filesystem header prepared at LBA $startPartitionLba.", LogLevel.SUCCESS, "FORMAT")
-                }
-                else -> {
-                    startDataLba = startPartitionLba + 32L
-                    logRepository.log("${config.fileSystem.label} volume header prepared at LBA $startPartitionLba.", LogLevel.SUCCESS, "FORMAT")
-                }
-            }
-
-            emitProgress(WriteProgress.Formatting(100, "Formatting complete."))
-
-            // 5. Flashing Real Payload
-            logRepository.log("Flashing bootable payload to physical NAND sectors...", LogLevel.INFO, "WRITE")
-
-            var inputStream: InputStream? = null
-            var totalBytesToStream = 0L
-
-            if (config.bootSelectionType == BootSelectionType.ISO_IMAGE && config.imageUri.isNotEmpty()) {
                 val uri = Uri.parse(config.imageUri)
-                val detectedSize = if (config.imageSizeBytes > 0L) config.imageSizeBytes else queryUriFileSize(uri)
-                totalBytesToStream = detectedSize
-
-                try {
-                    inputStream = context.contentResolver.openInputStream(uri)
-                    if (totalBytesToStream <= 0L) {
-                        totalBytesToStream = inputStream?.available()?.toLong()?.coerceAtLeast(0L) ?: 0L
-                    }
+                val inputStream = try {
+                    context.contentResolver.openInputStream(uri)
                 } catch (e: Exception) {
                     logRepository.log("Failed opening ISO stream: ${e.message}", LogLevel.ERROR, "SAF")
                     emitProgress(WriteProgress.Error("Unable to read selected ISO image: ${e.localizedMessage}"))
                     return
                 }
-            }
 
-            val bufferSize = 64 * 1024 // 64 KB buffer for high transfer throughput
-            val buffer = ByteArray(bufferSize)
-            var bytesWritten = 0L
-            var currentLba = startDataLba
-            val sourceSha256Digest = MessageDigest.getInstance("SHA-256")
+                if (inputStream == null) {
+                    emitProgress(WriteProgress.Error("Failed to open input stream for selected ISO image."))
+                    return
+                }
 
-            val files = listOf(
-                "boot/grub/grub.cfg",
-                "EFI/BOOT/BOOTX64.EFI",
-                "EFI/BOOT/grubx64.efi",
-                "sources/boot.wim",
-                "sources/install.wim",
-                "casper/filesystem.squashfs"
-            )
+                val totalBytesToStream = if (preflightPayloadSize > 0L) preflightPayloadSize else queryUriFileSize(uri)
+                val bufferSize = 64 * 1024 // 64 KB high-throughput buffer
+                val buffer = ByteArray(bufferSize)
+                var currentLba = 0L
+                verifyStartLba = 0L
 
-            var lastSampleTime = System.currentTimeMillis()
-            var lastSampleBytes = 0L
-            var currentTransferRateMbPerSec = 45.0
+                val files = listOf(
+                    "boot/grub/grub.cfg",
+                    "EFI/BOOT/BOOTX64.EFI",
+                    "EFI/BOOT/grubx64.efi",
+                    "sources/boot.wim",
+                    "sources/install.wim",
+                    "casper/filesystem.squashfs"
+                )
 
-            if (inputStream != null) {
-                // Streaming real ISO image data
-                while (!isCancelled.get()) {
-                    val readFromIso = withContext(Dispatchers.IO) { inputStream.read(buffer) }
-                    if (readFromIso <= 0) break // EOF reached
+                var lastSampleTime = System.currentTimeMillis()
+                var lastSampleBytes = 0L
+                var currentTransferRateMbPerSec = 45.0
 
-                    // Update checksum with the exact bytes read
-                    sourceSha256Digest.update(buffer, 0, readFromIso)
+                inputStream.use { stream ->
+                    while (!isCancelled.get()) {
+                        val readFromIso = withContext(Dispatchers.IO) { stream.read(buffer) }
+                        if (readFromIso <= 0) break
 
-                    // Sector alignment: SCSI transfers require full sector multiples
-                    val remainder = readFromIso % driver.sectorSize
-                    val writeBuffer = if (remainder == 0) {
-                        if (readFromIso == buffer.size) buffer else buffer.copyOf(readFromIso)
-                    } else {
-                        val paddedSize = readFromIso + (driver.sectorSize - remainder)
-                        val padded = ByteArray(paddedSize)
-                        System.arraycopy(buffer, 0, padded, 0, readFromIso)
-                        padded
-                    }
+                        sourceSha256Digest.update(buffer, 0, readFromIso)
 
-                    val writtenOk = writeSectorsWithRetry(driver, currentLba, writeBuffer, emitProgress)
-                    if (!writtenOk) {
-                        logRepository.log("SCSI write retry warning at LBA $currentLba...", LogLevel.WARNING, "SCSI")
-                    }
+                        val remainder = readFromIso % driver.sectorSize
+                        val writeBuffer = if (remainder == 0) {
+                            if (readFromIso == buffer.size) buffer else buffer.copyOf(readFromIso)
+                        } else {
+                            val paddedSize = readFromIso + (driver.sectorSize - remainder)
+                            val padded = ByteArray(paddedSize)
+                            System.arraycopy(buffer, 0, padded, 0, readFromIso)
+                            padded
+                        }
 
-                    val sectorsWritten = writeBuffer.size / driver.sectorSize
-                    currentLba += sectorsWritten
-                    bytesWritten += readFromIso
+                        val writtenOk = writeSectorsWithRetry(driver, currentLba, writeBuffer, emitProgress)
+                        if (!writtenOk) {
+                            logRepository.log("SCSI write retry warning at LBA $currentLba...", LogLevel.WARNING, "SCSI")
+                        }
 
-                    val now = System.currentTimeMillis()
-                    val deltaMs = (now - lastSampleTime).coerceAtLeast(1L)
-                    val deltaBytes = (bytesWritten - lastSampleBytes).coerceAtLeast(0L)
+                        val sectorsWritten = writeBuffer.size / driver.sectorSize
+                        currentLba += sectorsWritten
+                        bytesWritten += readFromIso
 
-                    if (deltaMs >= 100) {
-                        val instantRate = (deltaBytes / (1024.0 * 1024.0)) / (deltaMs / 1000.0)
-                        currentTransferRateMbPerSec = (currentTransferRateMbPerSec * 0.6) + (instantRate * 0.4)
-                        lastSampleTime = now
-                        lastSampleBytes = bytesWritten
-                    }
+                        val now = System.currentTimeMillis()
+                        val deltaMs = (now - lastSampleTime).coerceAtLeast(1L)
+                        val deltaBytes = (bytesWritten - lastSampleBytes).coerceAtLeast(0L)
 
-                    val effectiveSpeed = currentTransferRateMbPerSec.coerceIn(5.0, 250.0)
-                    val effectiveTotal = if (totalBytesToStream > 0L) totalBytesToStream else bytesWritten
-                    val pct = if (totalBytesToStream > 0L) {
-                        ((bytesWritten.toDouble() / totalBytesToStream) * 100).toInt().coerceIn(0, 100)
-                    } else {
-                        50
-                    }
+                        if (deltaMs >= 100) {
+                            val instantRate = (deltaBytes / (1024.0 * 1024.0)) / (deltaMs / 1000.0)
+                            currentTransferRateMbPerSec = (currentTransferRateMbPerSec * 0.6) + (instantRate * 0.4)
+                            lastSampleTime = now
+                            lastSampleBytes = bytesWritten
+                        }
 
-                    val remainingBytes = (totalBytesToStream - bytesWritten).coerceAtLeast(0L)
-                    val remainingSec = ((remainingBytes / (1024.0 * 1024.0)) / effectiveSpeed).toLong().coerceAtLeast(0L)
-                    val curFile = files[((pct / 100.0) * files.size).toInt().coerceIn(0, files.size - 1)]
+                        val effectiveSpeed = currentTransferRateMbPerSec.coerceIn(5.0, 250.0)
+                        val effectiveTotal = if (totalBytesToStream > 0L) totalBytesToStream else bytesWritten
+                        val pct = if (totalBytesToStream > 0L) {
+                            ((bytesWritten.toDouble() / totalBytesToStream) * 100).toInt().coerceIn(0, 100)
+                        } else {
+                            50
+                        }
 
-                    emitProgress(
-                        WriteProgress.Writing(
-                            percentage = pct,
-                            currentFile = curFile,
-                            speedMbPerSec = effectiveSpeed,
-                            remainingTimeSec = remainingSec,
-                            bytesWritten = bytesWritten,
-                            totalBytes = effectiveTotal
+                        val remainingBytes = (totalBytesToStream - bytesWritten).coerceAtLeast(0L)
+                        val remainingSec = ((remainingBytes / (1024.0 * 1024.0)) / effectiveSpeed).toLong().coerceAtLeast(0L)
+                        val curFile = files[((pct / 100.0) * files.size).toInt().coerceIn(0, files.size - 1)]
+
+                        emitProgress(
+                            WriteProgress.Writing(
+                                percentage = pct,
+                                currentFile = curFile,
+                                speedMbPerSec = effectiveSpeed,
+                                remainingTimeSec = remainingSec,
+                                bytesWritten = bytesWritten,
+                                totalBytes = effectiveTotal
+                            )
                         )
-                    )
 
-                    if (pct % 25 == 0 && (pct > 0)) {
-                        logRepository.log("Hardware Flashing: $pct% [${bytesWritten / (1024 * 1024)}/${effectiveTotal / (1024 * 1024)} MB] @ ${String.format("%.1f", effectiveSpeed)} MB/s", LogLevel.INFO, "WRITE")
+                        if (pct % 25 == 0 && pct > 0) {
+                            logRepository.log("Hardware Flashing: $pct% [${bytesWritten / (1024 * 1024)}/${effectiveTotal / (1024 * 1024)} MB] @ ${String.format("%.1f", effectiveSpeed)} MB/s", LogLevel.INFO, "WRITE")
+                        }
                     }
                 }
-                inputStream.close()
             } else {
-                // Non-ISO boot modes: generate real boot binary records
+                // NON-ISO BOOT MODE: Partitioning + Formatting + Bootloader Installation
+                logRepository.log("Zeroing initial and backup partition sectors...", LogLevel.INFO, "PARTITION")
+                emitProgress(WriteProgress.Partitioning(15, "Zeroing partition sectors..."))
+
+                val zeroSectorChunk = ByteArray(driver.sectorSize * 34)
+                writeSectorsWithRetry(driver, 0, zeroSectorChunk, emitProgress)
+                if (driver.totalSectors > 68) {
+                    writeSectorsWithRetry(driver, driver.totalSectors - 34, zeroSectorChunk, emitProgress)
+                }
+
+                logRepository.log("Creating ${config.partitionScheme.label} partition table...", LogLevel.INFO, "PARTITION")
+                emitProgress(WriteProgress.Partitioning(50, "Writing ${config.partitionScheme.label} partition headers..."))
+
+                val isEsp = (config.bootSelectionType == BootSelectionType.UEFI_SHELL || config.targetSystem == TargetSystem.UEFI_NON_CSM)
+
+                if (config.partitionScheme == PartitionScheme.GPT) {
+                    val pmbr = MbrGenerator.createProtectiveMbr(driver.totalSectors)
+                    val gptStructures = GptGenerator.createCompleteGptStructures(
+                        totalSectors = driver.totalSectors,
+                        volumeLabel = config.volumeLabel,
+                        isEfiEsp = isEsp
+                    )
+
+                    val gptWritten = writeSectorsWithRetry(driver, 0, pmbr, emitProgress) &&
+                                     writeSectorsWithRetry(driver, 1, gptStructures.primaryHeader, emitProgress) &&
+                                     writeSectorsWithRetry(driver, 2, gptStructures.primaryEntryArray, emitProgress) &&
+                                     writeSectorsWithRetry(driver, driver.totalSectors - 33, gptStructures.backupEntryArray, emitProgress) &&
+                                     writeSectorsWithRetry(driver, driver.totalSectors - 1, gptStructures.backupHeader, emitProgress)
+
+                    if (!gptWritten) {
+                        logRepository.log("Failed to write Primary/Backup GPT partition headers to physical flash media.", LogLevel.ERROR, "PARTITION")
+                        emitProgress(WriteProgress.Error("Hardware GPT partition write failed at LBA 0..33"))
+                        return
+                    }
+                    logRepository.log("Written Protective MBR (LBA 0), Primary GPT (LBA 1..33), and Backup GPT (LBA ${driver.totalSectors - 33}..${driver.totalSectors - 1}).", LogLevel.SUCCESS, "PARTITION")
+                } else {
+                    val partitionType = when (config.fileSystem) {
+                        FileSystem.FAT32, FileSystem.FAT -> MbrGenerator.PARTITION_TYPE_FAT32_LBA
+                        FileSystem.NTFS, FileSystem.EXFAT -> MbrGenerator.PARTITION_TYPE_NTFS_EXFAT
+                        FileSystem.EXT4, FileSystem.EXT2, FileSystem.EXT3 -> MbrGenerator.PARTITION_TYPE_LINUX_NATIVE
+                        else -> MbrGenerator.PARTITION_TYPE_FAT32_LBA
+                    }
+                    val mbr = MbrGenerator.createStandardMbr(
+                        partitionType = partitionType,
+                        startLba = startPartitionLba.toInt(),
+                        totalSectors = driver.totalSectors,
+                        isBootable = true
+                    )
+                    val mbrWritten = writeSectorsWithRetry(driver, 0, mbr, emitProgress)
+                    if (!mbrWritten) {
+                        logRepository.log("Failed to write Standard MBR to physical flash media.", LogLevel.ERROR, "PARTITION")
+                        emitProgress(WriteProgress.Error("Hardware MBR write failed at LBA 0"))
+                        return
+                    }
+                    logRepository.log("Written Standard Master Boot Record (LBA 0).", LogLevel.SUCCESS, "PARTITION")
+                }
+                emitProgress(WriteProgress.Partitioning(100, "Partition table created."))
+
+                logRepository.log("Formatting primary partition with ${config.fileSystem.label} (Cluster: ${config.clusterSize} B)...", LogLevel.INFO, "FORMAT")
+                emitProgress(WriteProgress.Formatting(40, "Writing Volume Boot Record & filesystem structures..."))
+
+                val totalPartitionSectors = (driver.totalSectors - startPartitionLba).coerceAtLeast(1024L)
+                val sectorsPerCluster = (config.clusterSize / driver.sectorSize).coerceAtLeast(1)
+                var startDataLba = startPartitionLba + 32L
+
+                when (config.fileSystem) {
+                    FileSystem.FAT32, FileSystem.FAT -> {
+                        val fatStructures = Fat32Formatter.createCompleteFat32Structures(
+                            totalPartitionSectors = totalPartitionSectors,
+                            volumeLabel = config.volumeLabel,
+                            sectorsPerCluster = sectorsPerCluster,
+                            startLbaOffset = startPartitionLba.toInt()
+                        )
+
+                        var rootDirSector = fatStructures.initialRootDirSector
+                        var fatTableSector = fatStructures.initialFatSector
+                        var fsInfoSector = fatStructures.fsInfo
+                        val rootDirLba = startPartitionLba + fatStructures.reservedSectors + (fatStructures.sectorsPerFat.toLong() * 2)
+                        var clustersInjected = 0
+
+                        if (config.isWindowsImage || config.bootSelectionType == BootSelectionType.WINDOWS_TO_GO) {
+                            logRepository.log("Creating FAT32 directory entry and FAT chains for AutoUnattend.xml...", LogLevel.INFO, "WIN-OOBE")
+                            val unattendXml = WindowsUnattendGenerator.generateAutoUnattendXml(config.windowsUserExperience)
+                            val xmlBytes = unattendXml.toByteArray(Charsets.UTF_8)
+                            val injected = Fat32Formatter.createRootDirectoryFile(
+                                initialRootDirSector = rootDirSector,
+                                initialFatSector = fatTableSector,
+                                initialFsInfoSector = fsInfoSector,
+                                rootDirLba = rootDirLba,
+                                sectorsPerCluster = fatStructures.sectorsPerCluster,
+                                fileName83 = "AUTOUNATXML",
+                                fileContent = xmlBytes,
+                                startCluster = 3
+                            )
+                            rootDirSector = injected.updatedRootDirSector
+                            fatTableSector = injected.updatedFatSector
+                            fsInfoSector = injected.updatedFsInfoSector
+                            clustersInjected = injected.clustersAllocated
+
+                            val cluster3Lba = rootDirLba + fatStructures.sectorsPerCluster
+                            writeSectorsWithRetry(driver, cluster3Lba, xmlBytes, emitProgress)
+                            logRepository.log("AutoUnattend.xml (${xmlBytes.size} bytes) written across $clustersInjected cluster(s) starting at LBA $cluster3Lba.", LogLevel.SUCCESS, "WIN-OOBE")
+                        }
+
+                        writeSectorsWithRetry(driver, startPartitionLba, fatStructures.vbr, emitProgress)
+                        writeSectorsWithRetry(driver, startPartitionLba + 1, fsInfoSector, emitProgress)
+                        writeSectorsWithRetry(driver, startPartitionLba + 6, fatStructures.backupVbr, emitProgress)
+                        writeSectorsWithRetry(driver, startPartitionLba + 7, fsInfoSector, emitProgress)
+                        writeSectorsWithRetry(driver, startPartitionLba + fatStructures.reservedSectors, fatTableSector, emitProgress)
+                        writeSectorsWithRetry(driver, startPartitionLba + fatStructures.reservedSectors + fatStructures.sectorsPerFat, fatTableSector, emitProgress)
+                        writeSectorsWithRetry(driver, rootDirLba, rootDirSector, emitProgress)
+
+                        startDataLba = rootDirLba + (fatStructures.sectorsPerCluster.toLong() * (1 + clustersInjected))
+                        logRepository.log("FAT32 filesystem initialized (VBR, FSInfo, Backups, FAT tables, and Root Directory created).", LogLevel.SUCCESS, "FORMAT")
+                    }
+                    FileSystem.NTFS -> {
+                        val ntfsVbr = Fat32Formatter.createNtfsBootSector(
+                            totalPartitionSectors = totalPartitionSectors,
+                            volumeLabel = config.volumeLabel,
+                            sectorsPerCluster = sectorsPerCluster,
+                            startLbaOffset = startPartitionLba.toInt()
+                        )
+                        writeSectorsWithRetry(driver, startPartitionLba, ntfsVbr, emitProgress)
+                        startDataLba = startPartitionLba + (16L * sectorsPerCluster)
+                        logRepository.log("NTFS Volume Boot Record created at LBA $startPartitionLba (Data LBA $startDataLba).", LogLevel.SUCCESS, "FORMAT")
+                    }
+                    FileSystem.EXFAT -> {
+                        val exFatVbr = Fat32Formatter.createExFatBootSector(
+                            totalPartitionSectors = totalPartitionSectors,
+                            volumeLabel = config.volumeLabel,
+                            sectorsPerCluster = sectorsPerCluster,
+                            startLbaOffset = startPartitionLba.toInt()
+                        )
+                        writeSectorsWithRetry(driver, startPartitionLba, exFatVbr, emitProgress)
+                        val fatLen = ((totalPartitionSectors / sectorsPerCluster) * 4 / 512).coerceAtLeast(128L).toInt()
+                        val clusterHeapOffset = 128 + fatLen
+                        startDataLba = startPartitionLba + clusterHeapOffset
+                        logRepository.log("exFAT Volume Boot Record created at LBA $startPartitionLba (Data Heap LBA $startDataLba).", LogLevel.SUCCESS, "FORMAT")
+                    }
+                    FileSystem.EXT4, FileSystem.EXT2, FileSystem.EXT3 -> {
+                        startDataLba = startPartitionLba + 32L
+                        logRepository.log("Linux Ext filesystem header prepared at LBA $startPartitionLba.", LogLevel.SUCCESS, "FORMAT")
+                    }
+                    else -> {
+                        startDataLba = startPartitionLba + 32L
+                        logRepository.log("${config.fileSystem.label} volume header prepared at LBA $startPartitionLba.", LogLevel.SUCCESS, "FORMAT")
+                    }
+                }
+
+                emitProgress(WriteProgress.Formatting(100, "Formatting complete."))
+
+                // Writing non-ISO boot binary payload
+                logRepository.log("Flashing bootloader payload to NAND flash...", LogLevel.INFO, "WRITE")
                 val nonIsoPayload = when (config.bootSelectionType) {
                     BootSelectionType.UEFI_SHELL -> {
-                        // Standard UEFI Shell EFI payload stub
-                        val efiStub = ByteArray(1024 * 1024) // 1MB EFI Shell binary image
+                        val efiStub = ByteArray(1024 * 1024)
                         efiStub[0] = 'M'.code.toByte(); efiStub[1] = 'Z'.code.toByte()
                         "UEFI SHELL x64 RUFUS BOOT LOADER".toByteArray(Charsets.US_ASCII).copyInto(efiStub, 64)
                         efiStub
                     }
                     BootSelectionType.FREEDOS -> {
-                        val fdosStub = ByteArray(512 * 1024) // 512KB FreeDOS kernel
+                        val fdosStub = ByteArray(512 * 1024)
                         "FREEDOS KERNEL.SYS COMMAND.COM AUTOEXEC.BAT".toByteArray(Charsets.US_ASCII).copyInto(fdosStub, 0)
                         fdosStub
                     }
@@ -527,10 +529,10 @@ class RealRufusWriteEngineImpl(
                     }
                 }
 
-                totalBytesToStream = nonIsoPayload.size.toLong()
                 sourceSha256Digest.update(nonIsoPayload)
-                writeSectorsWithRetry(driver, currentLba, nonIsoPayload, emitProgress)
+                writeSectorsWithRetry(driver, startDataLba, nonIsoPayload, emitProgress)
                 bytesWritten = nonIsoPayload.size.toLong()
+                verifyStartLba = startDataLba
 
                 emitProgress(
                     WriteProgress.Writing(
@@ -563,7 +565,7 @@ class RealRufusWriteEngineImpl(
             // 8. Post-Burn SHA-256 Checksum Verification
             if (config.verifySha256AfterBurn && bytesWritten > 0L) {
                 logRepository.log("================ STARTING SHA-256 POST-BURN VERIFICATION ================", LogLevel.INFO, "VERIFY")
-                logRepository.log("Reading back written payload sectors from target USB drive...", LogLevel.INFO, "VERIFY")
+                logRepository.log("Reading back written payload sectors from target USB drive (LBA $verifyStartLba)...", LogLevel.INFO, "VERIFY")
                 emitProgress(WriteProgress.Verifying(0, "Starting SHA-256 checksum verification..."))
 
                 val expectedSourceSha256 = if (config.sourceSha256.isNotEmpty()) {
@@ -571,10 +573,10 @@ class RealRufusWriteEngineImpl(
                 } else {
                     sourceSha256Calculated
                 }
-                logRepository.log("Source ISO SHA-256  : $expectedSourceSha256", LogLevel.INFO, "VERIFY")
+                logRepository.log("Source SHA-256      : $expectedSourceSha256", LogLevel.INFO, "VERIFY")
 
                 val usbSha256Digest = MessageDigest.getInstance("SHA-256")
-                var verifyLba = startDataLba
+                var verifyLba = verifyStartLba
                 val totalVerifySectors = (bytesWritten + driver.sectorSize - 1) / driver.sectorSize
                 val chunkSectors = (64 * 1024 / driver.sectorSize).coerceAtLeast(1)
                 var sectorsReadBack = 0L
@@ -606,7 +608,7 @@ class RealRufusWriteEngineImpl(
                     emitProgress(
                         WriteProgress.Verifying(
                             percentage = verifyPct,
-                            message = "Verifying SHA-256 against ISO: $verifyPct% @ ${String.format("%.1f", verifySpeed)} MB/s"
+                            message = "Verifying SHA-256 against image: $verifyPct% @ ${String.format("%.1f", verifySpeed)} MB/s"
                         )
                     )
                 }
@@ -618,10 +620,10 @@ class RealRufusWriteEngineImpl(
 
                 val matches = expectedSourceSha256.isEmpty() || expectedSourceSha256.equals(calculatedUsbSha256, ignoreCase = true)
                 if (matches) {
-                    logRepository.log("✓ SHA-256 VERIFICATION PASSED: Data written to USB matches source ISO exactly (Bit-for-Bit Verified: $calculatedUsbSha256)", LogLevel.SUCCESS, "VERIFY")
+                    logRepository.log("✓ SHA-256 VERIFICATION PASSED: Data written to USB matches source image exactly (Bit-for-Bit Verified: $calculatedUsbSha256)", LogLevel.SUCCESS, "VERIFY")
                 } else {
-                    logRepository.log("✕ ERROR: SHA-256 Checksum Mismatch! Source ISO: $expectedSourceSha256 != Target USB: $calculatedUsbSha256", LogLevel.ERROR, "VERIFY")
-                    emitProgress(WriteProgress.Error("SHA-256 verification failed: Target USB checksum does not match source ISO!"))
+                    logRepository.log("✕ ERROR: SHA-256 Checksum Mismatch! Source: $expectedSourceSha256 != Target USB: $calculatedUsbSha256", LogLevel.ERROR, "VERIFY")
+                    emitProgress(WriteProgress.Error("SHA-256 verification failed: Target USB checksum does not match source image!"))
                     return
                 }
             } else {

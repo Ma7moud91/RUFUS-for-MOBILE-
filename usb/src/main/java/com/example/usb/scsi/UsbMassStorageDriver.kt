@@ -132,19 +132,21 @@ class UsbMassStorageDriver(
             }
 
             // 6. Read Drive Geometry (Read Capacity 10 / 16)
-            val capRead = readCapacity()
-            if (!capRead || totalSectors <= 0) {
-                Log.w(TAG, "Read capacity returned 0 or failed. Attempting secondary probe...")
+            var capRead = readCapacity()
+            if (!capRead || totalSectors <= 0L) {
+                Log.w(TAG, "Read capacity returned 0 or failed. Attempting secondary probe with REQUEST SENSE...")
                 requestSense()
-                readCapacity()
+                capRead = readCapacity()
             }
 
-            // Fallback geometry if drive controller gave incomplete header
-            if (sectorSize !in 512..4096) sectorSize = 512
-            if (totalSectors <= 0L) {
-                totalSectors = (32L * 1024 * 1024 * 1024) / sectorSize // Default 32 GB approximation
-                totalCapacityBytes = totalSectors * sectorSize
+            if (!capRead || totalSectors <= 0L) {
+                Log.e(TAG, "Unable to determine storage media capacity for ${usbDevice.deviceName}. Aborting open to prevent data corruption.")
+                close()
+                return false
             }
+
+            if (sectorSize !in 512..4096) sectorSize = 512
+            totalCapacityBytes = totalSectors * sectorSize
 
             Log.i(TAG, "USB Mass Storage successfully opened: $totalSectors sectors ($sectorSize B/sec) = ${totalCapacityBytes / (1024 * 1024)} MB")
             return true
@@ -344,16 +346,28 @@ class UsbMassStorageDriver(
 
             var success = false
             for (retry in 0..2) {
-                val cdb = ByteBuffer.allocate(10).order(ByteOrder.BIG_ENDIAN)
-                cdb.put(ScsiConstants.WRITE_10)
-                cdb.put(0.toByte()) // Flags
-                cdb.putInt(currentLba.toInt()) // LBA 32-bit
-                cdb.put(0.toByte()) // Group number
-                cdb.putShort(sectorsThisBatch.toShort()) // Transfer length in sectors
-                cdb.put(0.toByte()) // Control
+                val cdb = if (currentLba >= 0xFFFFFFFFL) {
+                    val buf = ByteBuffer.allocate(16).order(ByteOrder.BIG_ENDIAN)
+                    buf.put(ScsiConstants.WRITE_16)
+                    buf.put(0.toByte()) // WRPROTECT / DPO / FUA
+                    buf.putLong(currentLba) // 64-bit LBA
+                    buf.putInt(sectorsThisBatch) // 32-bit Transfer Length
+                    buf.put(0.toByte()) // Group number
+                    buf.put(0.toByte()) // Control
+                    buf.array()
+                } else {
+                    val buf = ByteBuffer.allocate(10).order(ByteOrder.BIG_ENDIAN)
+                    buf.put(ScsiConstants.WRITE_10)
+                    buf.put(0.toByte()) // Flags
+                    buf.putInt(currentLba.toInt()) // LBA 32-bit
+                    buf.put(0.toByte()) // Group number
+                    buf.putShort(sectorsThisBatch.toShort()) // Transfer length in sectors
+                    buf.put(0.toByte()) // Control
+                    buf.array()
+                }
 
                 val tag = tagGenerator.getAndIncrement()
-                val cbw = ScsiCbw(tag, sendBuffer.size, ScsiConstants.DIRECTION_OUT, 0, cdb.array())
+                val cbw = ScsiCbw(tag, sendBuffer.size, ScsiConstants.DIRECTION_OUT, 0, cdb)
 
                 if (!sendCbw(cbw)) {
                     clearEndpointHalt(epOut)
@@ -406,16 +420,28 @@ class UsbMassStorageDriver(
             var batchSuccess = false
 
             for (retry in 0..2) {
-                val cdb = ByteBuffer.allocate(10).order(ByteOrder.BIG_ENDIAN)
-                cdb.put(ScsiConstants.READ_10)
-                cdb.put(0.toByte())
-                cdb.putInt(currentLba.toInt())
-                cdb.put(0.toByte())
-                cdb.putShort(sectorsThisBatch.toShort())
-                cdb.put(0.toByte())
+                val cdb = if (currentLba >= 0xFFFFFFFFL) {
+                    val buf = ByteBuffer.allocate(16).order(ByteOrder.BIG_ENDIAN)
+                    buf.put(ScsiConstants.READ_16)
+                    buf.put(0.toByte()) // RDPROTECT / DPO / FUA
+                    buf.putLong(currentLba) // 64-bit LBA
+                    buf.putInt(sectorsThisBatch) // 32-bit Transfer Length
+                    buf.put(0.toByte()) // Group number
+                    buf.put(0.toByte()) // Control
+                    buf.array()
+                } else {
+                    val buf = ByteBuffer.allocate(10).order(ByteOrder.BIG_ENDIAN)
+                    buf.put(ScsiConstants.READ_10)
+                    buf.put(0.toByte())
+                    buf.putInt(currentLba.toInt())
+                    buf.put(0.toByte())
+                    buf.putShort(sectorsThisBatch.toShort())
+                    buf.put(0.toByte())
+                    buf.array()
+                }
 
                 val tag = tagGenerator.getAndIncrement()
-                val cbw = ScsiCbw(tag, bytesThisBatch, ScsiConstants.DIRECTION_IN, 0, cdb.array())
+                val cbw = ScsiCbw(tag, bytesThisBatch, ScsiConstants.DIRECTION_IN, 0, cdb)
                 if (!sendCbw(cbw)) {
                     clearEndpointHalt(epOut)
                     continue

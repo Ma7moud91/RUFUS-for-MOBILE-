@@ -136,20 +136,33 @@ object Fat32Formatter {
         )
     }
 
+data class Fat32InjectedResult(
+    val updatedRootDirSector: ByteArray,
+    val updatedFatSector: ByteArray,
+    val updatedFsInfoSector: ByteArray,
+    val clustersAllocated: Int,
+    val nextFreeCluster: Int
+)
+
     /**
-     * Injects a real file (e.g. AUTOUNAT.XML) into FAT32 root directory and updates the FAT allocation table.
+     * Injects a real file (e.g. AUTOUNAT.XML) into FAT32 root directory and updates the FAT allocation table and FSInfo.
      */
     fun createRootDirectoryFile(
         initialRootDirSector: ByteArray,
         initialFatSector: ByteArray,
+        initialFsInfoSector: ByteArray,
         rootDirLba: Long,
         sectorsPerCluster: Int,
         fileName83: String = "AUTOUNATXML",
         fileContent: ByteArray,
         startCluster: Int = 3
-    ): Pair<ByteArray, ByteArray> {
+    ): Fat32InjectedResult {
         val updatedRootDir = initialRootDirSector.copyOf()
         val updatedFat = initialFatSector.copyOf()
+        val updatedFsInfo = initialFsInfoSector.copyOf()
+
+        val clusterBytes = (sectorsPerCluster * 512).coerceAtLeast(512)
+        val clustersNeeded = ((fileContent.size + clusterBytes - 1) / clusterBytes).coerceAtLeast(1)
 
         // Write 32-byte SFN directory record at offset 32 (Entry 1, following Volume Label at Entry 0)
         val dirBuf = ByteBuffer.wrap(updatedRootDir).order(ByteOrder.LITTLE_ENDIAN)
@@ -169,12 +182,65 @@ object Fat32Formatter {
         dirBuf.putShort((startCluster and 0xFFFF).toShort()) // Low cluster
         dirBuf.putInt(fileContent.size) // File size
 
-        // Update FAT1/FAT2 sector to mark startCluster as EOF (0x0FFFFFFF)
+        // Update FAT1/FAT2 sector chain across all clusters
         val fatBuf = ByteBuffer.wrap(updatedFat).order(ByteOrder.LITTLE_ENDIAN)
-        fatBuf.position(startCluster * 4)
-        fatBuf.putInt(0x0FFFFFFF)
+        for (i in 0 until clustersNeeded) {
+            val currentCluster = startCluster + i
+            val fatOffset = currentCluster * 4
+            if (fatOffset + 4 <= updatedFat.size) {
+                fatBuf.position(fatOffset)
+                if (i == clustersNeeded - 1) {
+                    fatBuf.putInt(0x0FFFFFFF) // End of cluster chain (EOC)
+                } else {
+                    fatBuf.putInt(currentCluster + 1) // Link to next cluster
+                }
+            }
+        }
 
-        return Pair(updatedRootDir, updatedFat)
+        // Update FSInfo free cluster count and next free cluster pointer
+        val nextFree = startCluster + clustersNeeded
+        val fsBuf = ByteBuffer.wrap(updatedFsInfo).order(ByteOrder.LITTLE_ENDIAN)
+        fsBuf.position(488)
+        val currentFree = fsBuf.getInt(488)
+        if (currentFree > 0) {
+            fsBuf.putInt((currentFree - clustersNeeded).coerceAtLeast(0))
+        }
+        fsBuf.position(492)
+        fsBuf.putInt(nextFree)
+
+        return Fat32InjectedResult(
+            updatedRootDirSector = updatedRootDir,
+            updatedFatSector = updatedFat,
+            updatedFsInfoSector = updatedFsInfo,
+            clustersAllocated = clustersNeeded,
+            nextFreeCluster = nextFree
+        )
+    }
+
+    /**
+     * Backward-compatible Pair helper.
+     */
+    fun createRootDirectoryFile(
+        initialRootDirSector: ByteArray,
+        initialFatSector: ByteArray,
+        rootDirLba: Long,
+        sectorsPerCluster: Int,
+        fileName83: String = "AUTOUNATXML",
+        fileContent: ByteArray,
+        startCluster: Int = 3
+    ): Pair<ByteArray, ByteArray> {
+        val dummyFsInfo = ByteArray(512)
+        val res = createRootDirectoryFile(
+            initialRootDirSector = initialRootDirSector,
+            initialFatSector = initialFatSector,
+            initialFsInfoSector = dummyFsInfo,
+            rootDirLba = rootDirLba,
+            sectorsPerCluster = sectorsPerCluster,
+            fileName83 = fileName83,
+            fileContent = fileContent,
+            startCluster = startCluster
+        )
+        return Pair(res.updatedRootDirSector, res.updatedFatSector)
     }
 
     /**
