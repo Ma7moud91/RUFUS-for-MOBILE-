@@ -88,16 +88,143 @@ class RufusPhase3UnitTest {
 
         assertTrue(exFat.bitmapClustersNeeded > 1)
         assertEquals(2 + exFat.bitmapClustersNeeded, exFat.rootDirClusterNumber)
+        assertTrue("initialFatSectors must cover all bitmap clusters and root dir", exFat.initialFatSectors.size >= 1)
 
-        val fatBuf = ByteBuffer.wrap(exFat.initialFatSector).order(ByteOrder.LITTLE_ENDIAN)
+        val combinedFat = ByteArray(exFat.initialFatSectors.sumOf { it.size })
+        var offset = 0
+        for (sec in exFat.initialFatSectors) {
+            System.arraycopy(sec, 0, combinedFat, offset, sec.size)
+            offset += sec.size
+        }
+
+        val fatBuf = ByteBuffer.wrap(combinedFat).order(ByteOrder.LITTLE_ENDIAN)
         assertEquals(0xFFFFFFF8.toInt(), fatBuf.getInt(0 * 4)) // Media type
         assertEquals(0xFFFFFFFF.toInt(), fatBuf.getInt(1 * 4)) // End of chain
 
         // Check bitmap FAT chain (cluster 2 -> 3 -> 4 ...)
         for (c in 2 until (2 + exFat.bitmapClustersNeeded - 1)) {
-            if (c * 4 + 4 <= 512) {
-                assertEquals(c + 1, fatBuf.getInt(c * 4))
-            }
+            assertEquals(c + 1, fatBuf.getInt(c * 4))
+        }
+        assertEquals(0xFFFFFFFF.toInt(), fatBuf.getInt((2 + exFat.bitmapClustersNeeded - 1) * 4))
+        assertEquals(0xFFFFFFFF.toInt(), fatBuf.getInt(exFat.rootDirClusterNumber * 4))
+    }
+
+    @Test
+    fun testExFatSimulated64GbMultiSectorFat() {
+        // 64 GB partition @ 4KB clusters (sectorsPerCluster = 8)
+        val totalSectors = 64L * 1024 * 1024 * 1024 / 512
+        val exFat = Fat32Formatter.createCompleteExFatStructures(
+            totalPartitionSectors = totalSectors,
+            volumeLabel = "EXFAT64G",
+            sectorsPerCluster = 8,
+            startLbaOffset = 2048
+        )
+
+        // ~16.7M clusters -> ~2MB bitmap -> 512 clusters needed for bitmap!
+        assertEquals(512, exFat.bitmapClustersNeeded)
+        assertEquals(514, exFat.rootDirClusterNumber)
+        assertTrue("FAT table must have multiple sectors to hold 515 entries (515*4=2060 bytes => 5 sectors)", exFat.initialFatSectors.size >= 5)
+
+        val combinedFat = ByteArray(exFat.initialFatSectors.sumOf { it.size })
+        var off = 0
+        for (sec in exFat.initialFatSectors) {
+            System.arraycopy(sec, 0, combinedFat, off, sec.size)
+            off += sec.size
+        }
+
+        val fatBuf = ByteBuffer.wrap(combinedFat).order(ByteOrder.LITTLE_ENDIAN)
+        assertEquals(0xFFFFFFF8.toInt(), fatBuf.getInt(0 * 4))
+        assertEquals(0xFFFFFFFF.toInt(), fatBuf.getInt(1 * 4))
+
+        // Check all 512 bitmap clusters are chained
+        for (c in 2 until (2 + 512 - 1)) {
+            assertEquals("Cluster $c must link to ${c + 1}", c + 1, fatBuf.getInt(c * 4))
+        }
+        // Bitmap last cluster (513) EOC
+        assertEquals(0xFFFFFFFF.toInt(), fatBuf.getInt(513 * 4))
+        // Root directory cluster (514) EOC
+        assertEquals(0xFFFFFFFF.toInt(), fatBuf.getInt(514 * 4))
+    }
+
+    @Test
+    fun testEfiBootTree300ClusterMultiSectorFat() {
+        val fatStructures = Fat32Formatter.createCompleteFat32Structures(
+            totalPartitionSectors = 2097152L, // 1 GB
+            volumeLabel = "EFISHELL",
+            sectorsPerCluster = 8 // 4 KB per cluster
+        )
+
+        // 300 clusters payload = 300 * 4096 bytes = 1,228,800 bytes (similar to shellx64.efi ~1.14 MB)
+        val payloadSize = 300 * 4096
+        val shellPayload = ByteArray(payloadSize) { 0x5A.toByte() }
+
+        // Start cluster = 3 (EFI dir: 3, BOOT dir: 4, Payload: 5..304)
+        // Highest cluster = 304 -> requires (305 * 4) = 1220 bytes -> 3 sectors
+        val fatSectors = listOf(
+            fatStructures.initialFatSector.copyOf(),
+            ByteArray(512),
+            ByteArray(512)
+        )
+
+        val efiTree = Fat32Formatter.createEfiBootTree(
+            initialRootDirSector = fatStructures.initialRootDirSector,
+            initialFatSectors = fatSectors,
+            initialFsInfoSector = fatStructures.fsInfo,
+            sectorsPerCluster = 8,
+            efiBinaryPayload = shellPayload,
+            startCluster = 3
+        )
+
+        assertEquals(3, efiTree.updatedFatSectors.size)
+        assertEquals(3, efiTree.efiDirCluster)
+        assertEquals(4, efiTree.bootDirCluster)
+        assertEquals(5, efiTree.payloadStartCluster)
+        assertEquals(302, efiTree.totalClustersAllocated) // 1 + 1 + 300
+
+        val combinedFat = ByteArray(3 * 512)
+        var offset = 0
+        for (sec in efiTree.updatedFatSectors) {
+            System.arraycopy(sec, 0, combinedFat, offset, 512)
+            offset += 512
+        }
+
+        val fatBuf = ByteBuffer.wrap(combinedFat).order(ByteOrder.LITTLE_ENDIAN)
+        assertEquals(0x0FFFFFFF, fatBuf.getInt(3 * 4)) // EFI dir EOC
+        assertEquals(0x0FFFFFFF, fatBuf.getInt(4 * 4)) // BOOT dir EOC
+
+        // Verify payload FAT chain (5 -> 6 -> ... -> 304 -> EOC) across sectors 0, 1, and 2
+        for (c in 5 until 304) {
+            assertEquals("Cluster $c must link to ${c + 1}", c + 1, fatBuf.getInt(c * 4))
+        }
+        assertEquals(0x0FFFFFFF, fatBuf.getInt(304 * 4)) // Final payload cluster EOC
+    }
+
+    @Test
+    fun testCapacityGuardFailsLoudlyOnOverflow() {
+        val fatStructures = Fat32Formatter.createCompleteFat32Structures(
+            totalPartitionSectors = 65536L,
+            volumeLabel = "TINYFAT",
+            sectorsPerCluster = 8
+        )
+
+        // Single sector FAT table can only hold 128 entries (clusters 0..127)
+        val singleFatSector = listOf(fatStructures.initialFatSector.copyOf())
+        // Payload requiring 200 clusters starting at cluster 3 -> goes up to cluster 204
+        val largePayload = ByteArray(200 * 4096)
+
+        try {
+            Fat32Formatter.createEfiBootTree(
+                initialRootDirSector = fatStructures.initialRootDirSector,
+                initialFatSectors = singleFatSector,
+                initialFsInfoSector = fatStructures.fsInfo,
+                sectorsPerCluster = 8,
+                efiBinaryPayload = largePayload,
+                startCluster = 3
+            )
+            fail("Expected IllegalStateException when payload exceeds provided FAT sectors")
+        } catch (e: IllegalStateException) {
+            assertTrue("Exception message should indicate FAT region too small: ${e.message}",
+                e.message?.contains("FAT region too small") == true)
         }
     }
 

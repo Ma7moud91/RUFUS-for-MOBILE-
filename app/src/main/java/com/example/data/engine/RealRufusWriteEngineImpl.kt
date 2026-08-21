@@ -809,13 +809,19 @@ class RealRufusWriteEngineImpl(
 
                         val writeMainBoot = writeSectorsWithRetry(driver, startPartitionLba, exFatStructures.mainBootRegion, emitProgress)
                         val writeBackupBoot = writeSectorsWithRetry(driver, startPartitionLba + 12, exFatStructures.backupBootRegion, emitProgress)
-                        val writeFatTable = writeSectorsWithRetry(driver, startPartitionLba + exFatStructures.fatOffsetSectors, exFatStructures.initialFatSector, emitProgress)
+                        var writeFatTableOk = true
+                        for ((idx, sector) in exFatStructures.initialFatSectors.withIndex()) {
+                            if (!writeSectorsWithRetry(driver, startPartitionLba + exFatStructures.fatOffsetSectors + idx, sector, emitProgress)) {
+                                writeFatTableOk = false
+                                break
+                            }
+                        }
                         val bitmapLba = startPartitionLba + exFatStructures.clusterHeapOffsetSectors + ((exFatStructures.allocationBitmapClusterNumber - 2) * exFatStructures.sectorsPerCluster)
                         val writeBitmap = writeSectorsWithRetry(driver, bitmapLba, exFatStructures.allocationBitmapClusters, emitProgress)
                         val rootDirLba = startPartitionLba + exFatStructures.clusterHeapOffsetSectors + ((exFatStructures.rootDirClusterNumber - 2) * exFatStructures.sectorsPerCluster)
                         val writeRootDir = writeSectorsWithRetry(driver, rootDirLba, exFatStructures.rootDirCluster, emitProgress)
 
-                        if (!writeMainBoot || !writeBackupBoot || !writeFatTable || !writeBitmap || !writeRootDir) {
+                        if (!writeMainBoot || !writeBackupBoot || !writeFatTableOk || !writeBitmap || !writeRootDir) {
                             logRepository.log("Failed to write exFAT volume structures to flash media.", LogLevel.ERROR, "EXFAT")
                             emitProgress(WriteProgress.Error(message = "Hardware write failed while initializing exFAT filesystem structures."))
                             return
@@ -823,7 +829,7 @@ class RealRufusWriteEngineImpl(
 
                         logRepository.log("exFAT Main Boot Region (VBR + Extended Boot Sectors + OEM + Checksum) written at LBA $startPartitionLba..${startPartitionLba + 11}.", LogLevel.SUCCESS, "EXFAT")
                         logRepository.log("exFAT Backup Boot Region written at LBA ${startPartitionLba + 12}..${startPartitionLba + 23}.", LogLevel.SUCCESS, "EXFAT")
-                        logRepository.log("exFAT FAT Table (Offset: ${exFatStructures.fatOffsetSectors} sectors, Length: ${exFatStructures.fatLengthSectors} sectors) initialized.", LogLevel.SUCCESS, "EXFAT")
+                        logRepository.log("exFAT FAT Table (Offset: ${exFatStructures.fatOffsetSectors} sectors, Length: ${exFatStructures.fatLengthSectors} sectors, Active Sectors: ${exFatStructures.initialFatSectors.size}) initialized.", LogLevel.SUCCESS, "EXFAT")
                         logRepository.log("exFAT Allocation Bitmap (${exFatStructures.bitmapClustersNeeded} cluster(s)) written at LBA $bitmapLba.", LogLevel.SUCCESS, "EXFAT")
                         logRepository.log("exFAT Root Directory (Cluster ${exFatStructures.rootDirClusterNumber}) initialized with Volume Label '${config.volumeLabel}' at LBA $rootDirLba.", LogLevel.SUCCESS, "EXFAT")
 
@@ -844,37 +850,28 @@ class RealRufusWriteEngineImpl(
                             startLbaOffset = startPartitionLba.toInt()
                         )
 
-                        var rootDirSector = fatStructures.initialRootDirSector
-                        var fatTableSector = fatStructures.initialFatSector
-                        var fsInfoSector = fatStructures.fsInfo
+                        val clusterBytes = (fatStructures.sectorsPerCluster * driver.sectorSize).coerceAtLeast(512)
                         val rootDirLba = startPartitionLba + fatStructures.reservedSectors + (fatStructures.sectorsPerFat.toLong() * 2)
-                        var clustersInjected = 0
 
-                        if (config.isWindowsImage || config.bootSelectionType == BootSelectionType.WINDOWS_TO_GO) {
-                            logRepository.log("Creating FAT32 directory entry and FAT chains for AutoUnattend.xml...", LogLevel.INFO, "WIN-OOBE")
-                            val unattendXml = WindowsUnattendGenerator.generateAutoUnattendXml(config.windowsUserExperience)
-                            val xmlBytes = unattendXml.toByteArray(Charsets.UTF_8)
-                            val injected = Fat32Formatter.createRootDirectoryFile(
-                                initialRootDirSector = rootDirSector,
-                                initialFatSector = fatTableSector,
-                                initialFsInfoSector = fsInfoSector,
-                                rootDirLba = rootDirLba,
-                                sectorsPerCluster = fatStructures.sectorsPerCluster,
-                                fileName83 = "AUTOUNATXML",
-                                fileContent = xmlBytes,
-                                startCluster = 3
-                            )
-                            rootDirSector = injected.updatedRootDirSector
-                            fatTableSector = injected.updatedFatSector
-                            fsInfoSector = injected.updatedFsInfoSector
-                            clustersInjected = injected.clustersAllocated
+                        // Pre-determine payload and calculate required FAT entries before mutation
+                        val unattendXmlBytes = if (config.isWindowsImage || config.bootSelectionType == BootSelectionType.WINDOWS_TO_GO) {
+                            val xml = WindowsUnattendGenerator.generateAutoUnattendXml(config.windowsUserExperience)
+                            xml.toByteArray(Charsets.UTF_8)
+                        } else null
 
-                            val cluster3Lba = rootDirLba + fatStructures.sectorsPerCluster
-                            writeSectorsWithRetry(driver, cluster3Lba, xmlBytes, emitProgress)
-                            logRepository.log("AutoUnattend.xml (${xmlBytes.size} bytes) written across $clustersInjected cluster(s) starting at LBA $cluster3Lba.", LogLevel.SUCCESS, "WIN-OOBE")
+                        val unattendClusters = if (unattendXmlBytes != null) {
+                            ((unattendXmlBytes.size + clusterBytes - 1) / clusterBytes).coerceAtLeast(1)
+                        } else 0
+
+                        var shellBytes: ByteArray? = null
+                        var defaultStubBytes: ByteArray? = null
+                        var msDosStubBytes: ByteArray? = null
+
+                        var endCluster = 2 // Root directory is cluster 2
+                        if (unattendClusters > 0) {
+                            endCluster = Math.max(endCluster, 3 + unattendClusters - 1)
                         }
 
-                        // Install Bootloader payload files into FAT32 filesystem
                         when (config.bootSelectionType) {
                             BootSelectionType.UEFI_SHELL -> {
                                 logRepository.log("Fetching official EDK2 UEFI Shell (x64) release binary...", LogLevel.INFO, "BOOTLOADER")
@@ -890,19 +887,87 @@ class RealRufusWriteEngineImpl(
                                     return
                                 }
 
-                                val shellBytes = shellResult.getOrThrow()
+                                val bytes = shellResult.getOrThrow()
+                                shellBytes = bytes
+                                val payloadClusters = ((bytes.size + clusterBytes - 1) / clusterBytes).coerceAtLeast(1)
+                                val treeStartCluster = 3 + unattendClusters
+                                val lastPayloadCluster = treeStartCluster + 2 + payloadClusters - 1
+                                endCluster = Math.max(endCluster, lastPayloadCluster)
+                            }
+                            BootSelectionType.MSDOS -> {
+                                logRepository.log("MS-DOS mode: Note that proprietary MS-DOS binaries cannot be bundled due to Microsoft licensing restrictions. Writing placeholder boot record.", LogLevel.INFO, "BOOTLOADER")
+                                val stub = ByteArray(64 * 1024)
+                                "MS-DOS IO.SYS MSDOS.SYS COMMAND.COM PLACEHOLDER".toByteArray(Charsets.US_ASCII).copyInto(stub, 0)
+                                msDosStubBytes = stub
+                                val stubClusters = ((stub.size + clusterBytes - 1) / clusterBytes).coerceAtLeast(1)
+                                endCluster = Math.max(endCluster, 3 + unattendClusters + stubClusters - 1)
+                            }
+                            else -> {
+                                val stub = ByteArray(32 * 1024)
+                                "RUFUS NON-BOOTABLE DATA PARTITION".toByteArray(Charsets.US_ASCII).copyInto(stub, 0)
+                                defaultStubBytes = stub
+                                val stubClusters = ((stub.size + clusterBytes - 1) / clusterBytes).coerceAtLeast(1)
+                                endCluster = Math.max(endCluster, 3 + unattendClusters + stubClusters - 1)
+                            }
+                        }
+
+                        // Pre-check capacity guard against total FAT capacity
+                        val totalFatEntriesAvailable = fatStructures.sectorsPerFat.toLong() * (driver.sectorSize / 4)
+                        if (endCluster.toLong() >= totalFatEntriesAvailable) {
+                            logRepository.log("ERROR: Payload requires cluster $endCluster which exceeds total FAT capacity ($totalFatEntriesAvailable entries).", LogLevel.ERROR, "FORMAT")
+                            emitProgress(WriteProgress.Error(message = "Payload too large for allocated FAT region"))
+                            return
+                        }
+
+                        val fatSectorsNeeded = (((endCluster + 1) * 4 + driver.sectorSize - 1) / driver.sectorSize).coerceIn(1, fatStructures.sectorsPerFat)
+
+                        var fatSectorsList = mutableListOf<ByteArray>()
+                        fatSectorsList.add(fatStructures.initialFatSector.copyOf())
+                        for (s in 1 until fatSectorsNeeded) {
+                            fatSectorsList.add(ByteArray(driver.sectorSize))
+                        }
+
+                        var rootDirSector = fatStructures.initialRootDirSector
+                        var fsInfoSector = fatStructures.fsInfo
+                        var clustersInjected = 0
+
+                        if (unattendXmlBytes != null) {
+                            logRepository.log("Creating FAT32 directory entry and FAT chains for AutoUnattend.xml...", LogLevel.INFO, "WIN-OOBE")
+                            val injected = Fat32Formatter.createRootDirectoryFile(
+                                initialRootDirSector = rootDirSector,
+                                initialFatSectors = fatSectorsList,
+                                initialFsInfoSector = fsInfoSector,
+                                rootDirLba = rootDirLba,
+                                sectorsPerCluster = fatStructures.sectorsPerCluster,
+                                fileName83 = "AUTOUNATXML",
+                                fileContent = unattendXmlBytes,
+                                startCluster = 3
+                            )
+                            rootDirSector = injected.updatedRootDirSector
+                            fatSectorsList = injected.updatedFatSectors.toMutableList()
+                            fsInfoSector = injected.updatedFsInfoSector
+                            clustersInjected = injected.clustersAllocated
+
+                            val cluster3Lba = rootDirLba + fatStructures.sectorsPerCluster
+                            writeSectorsWithRetry(driver, cluster3Lba, unattendXmlBytes, emitProgress)
+                            logRepository.log("AutoUnattend.xml (${unattendXmlBytes.size} bytes) written across $clustersInjected cluster(s) starting at LBA $cluster3Lba.", LogLevel.SUCCESS, "WIN-OOBE")
+                        }
+
+                        when (config.bootSelectionType) {
+                            BootSelectionType.UEFI_SHELL -> {
+                                val payload = shellBytes!!
                                 logRepository.log("Building UEFI ESP directory tree (\\EFI\\BOOT\\BOOTX64.EFI)...", LogLevel.INFO, "BOOTLOADER")
                                 val efiTree = Fat32Formatter.createEfiBootTree(
                                     initialRootDirSector = rootDirSector,
-                                    initialFatSectors = listOf(fatTableSector),
+                                    initialFatSectors = fatSectorsList,
                                     initialFsInfoSector = fsInfoSector,
                                     sectorsPerCluster = fatStructures.sectorsPerCluster,
-                                    efiBinaryPayload = shellBytes,
+                                    efiBinaryPayload = payload,
                                     startCluster = 3 + clustersInjected
                                 )
 
                                 rootDirSector = efiTree.updatedRootDirSector
-                                fatTableSector = efiTree.updatedFatSector
+                                fatSectorsList = efiTree.updatedFatSectors.toMutableList()
                                 fsInfoSector = efiTree.updatedFsInfoSector
 
                                 val efiDirLba = rootDirLba + (fatStructures.sectorsPerCluster.toLong() * (efiTree.efiDirCluster - 2))
@@ -911,31 +976,28 @@ class RealRufusWriteEngineImpl(
 
                                 writeSectorsWithRetry(driver, efiDirLba, efiTree.efiDirClusterSector, emitProgress)
                                 writeSectorsWithRetry(driver, bootDirLba, efiTree.bootDirClusterSector, emitProgress)
-                                writeSectorsWithRetry(driver, payloadLba, shellBytes, emitProgress)
+                                writeSectorsWithRetry(driver, payloadLba, payload, emitProgress)
 
-                                sourceSha256Digest.update(shellBytes)
-                                bytesWritten = shellBytes.size.toLong()
+                                sourceSha256Digest.update(payload)
+                                bytesWritten = payload.size.toLong()
                                 verifyStartLba = payloadLba
 
-                                logRepository.log("EDK2 UEFI Shell binary (${shellBytes.size} bytes) installed at \\EFI\\BOOT\\BOOTX64.EFI (Cluster ${efiTree.payloadStartCluster}, LBA $payloadLba).", LogLevel.SUCCESS, "BOOTLOADER")
+                                logRepository.log("EDK2 UEFI Shell binary (${payload.size} bytes) installed at \\EFI\\BOOT\\BOOTX64.EFI (Cluster ${efiTree.payloadStartCluster}, LBA $payloadLba).", LogLevel.SUCCESS, "BOOTLOADER")
                             }
                             BootSelectionType.MSDOS -> {
-                                logRepository.log("MS-DOS mode: Note that proprietary MS-DOS binaries cannot be bundled due to Microsoft licensing restrictions. Writing placeholder boot record.", LogLevel.INFO, "BOOTLOADER")
-                                val msDosStub = ByteArray(64 * 1024)
-                                "MS-DOS IO.SYS MSDOS.SYS COMMAND.COM PLACEHOLDER".toByteArray(Charsets.US_ASCII).copyInto(msDosStub, 0)
+                                val stub = msDosStubBytes!!
                                 val msDosLba = rootDirLba + (fatStructures.sectorsPerCluster.toLong() * (3 + clustersInjected - 2))
-                                writeSectorsWithRetry(driver, msDosLba, msDosStub, emitProgress)
-                                sourceSha256Digest.update(msDosStub)
-                                bytesWritten = msDosStub.size.toLong()
+                                writeSectorsWithRetry(driver, msDosLba, stub, emitProgress)
+                                sourceSha256Digest.update(stub)
+                                bytesWritten = stub.size.toLong()
                                 verifyStartLba = msDosLba
                             }
                             else -> {
-                                val defaultStub = ByteArray(32 * 1024)
-                                "RUFUS NON-BOOTABLE DATA PARTITION".toByteArray(Charsets.US_ASCII).copyInto(defaultStub, 0)
+                                val stub = defaultStubBytes!!
                                 val defaultLba = rootDirLba + (fatStructures.sectorsPerCluster.toLong() * (3 + clustersInjected - 2))
-                                writeSectorsWithRetry(driver, defaultLba, defaultStub, emitProgress)
-                                sourceSha256Digest.update(defaultStub)
-                                bytesWritten = defaultStub.size.toLong()
+                                writeSectorsWithRetry(driver, defaultLba, stub, emitProgress)
+                                sourceSha256Digest.update(stub)
+                                bytesWritten = stub.size.toLong()
                                 verifyStartLba = defaultLba
                             }
                         }
@@ -945,8 +1007,17 @@ class RealRufusWriteEngineImpl(
                         writeSectorsWithRetry(driver, startPartitionLba + 1, fsInfoSector, emitProgress)
                         writeSectorsWithRetry(driver, startPartitionLba + 6, fatStructures.backupVbr, emitProgress)
                         writeSectorsWithRetry(driver, startPartitionLba + 7, fsInfoSector, emitProgress)
-                        writeSectorsWithRetry(driver, startPartitionLba + fatStructures.reservedSectors, fatTableSector, emitProgress)
-                        writeSectorsWithRetry(driver, startPartitionLba + fatStructures.reservedSectors + fatStructures.sectorsPerFat, fatTableSector, emitProgress)
+
+                        // Write full FAT regions to FAT1 and FAT2
+                        val fat1BaseLba = startPartitionLba + fatStructures.reservedSectors
+                        val fat2BaseLba = fat1BaseLba + fatStructures.sectorsPerFat
+
+                        for ((idx, sector) in fatSectorsList.withIndex()) {
+                            writeSectorsWithRetry(driver, fat1BaseLba + idx, sector, emitProgress)
+                            writeSectorsWithRetry(driver, fat2BaseLba + idx, sector, emitProgress)
+                        }
+                        logRepository.log("Updated and wrote back ${fatSectorsList.size} FAT sectors to FAT1 (LBA $fat1BaseLba) and FAT2 (LBA $fat2BaseLba).", LogLevel.SUCCESS, "FORMAT")
+
                         writeSectorsWithRetry(driver, rootDirLba, rootDirSector, emitProgress)
 
                         startDataLba = rootDirLba + (fatStructures.sectorsPerCluster.toLong() * (1 + clustersInjected))

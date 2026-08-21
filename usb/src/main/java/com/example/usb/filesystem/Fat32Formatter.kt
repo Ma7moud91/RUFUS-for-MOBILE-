@@ -18,7 +18,7 @@ data class Fat32FormattedStructures(
 data class ExFatFormattedStructures(
     val mainBootRegion: ByteArray, // 12 sectors (6144 bytes)
     val backupBootRegion: ByteArray, // 12 sectors (6144 bytes)
-    val initialFatSector: ByteArray, // 512 bytes
+    val initialFatSectors: List<ByteArray>,
     val allocationBitmapClusters: ByteArray,
     val rootDirCluster: ByteArray,
     val fatOffsetSectors: Int,
@@ -30,7 +30,8 @@ data class ExFatFormattedStructures(
     val allocationBitmapClusterNumber: Int = 2,
     val bitmapClustersNeeded: Int = 1
 ) {
-    // Backwards compatibility getter
+    // Backwards compatibility getters
+    val initialFatSector: ByteArray get() = initialFatSectors.firstOrNull() ?: ByteArray(512)
     val allocationBitmapCluster: ByteArray get() = allocationBitmapClusters
 }
 
@@ -268,8 +269,17 @@ object Fat32Formatter {
         // Backup Boot Region (sectors 12..23) is identical to Main Boot Region
         val backupBootRegion = mainBootRegion.copyOf()
 
-        // Initial FAT table sector (512 bytes)
-        val initialFat = ByteArray(512)
+        // Multi-sector FAT table covering allocation bitmap chain and root directory
+        val lastReferencedCluster = Math.max(
+            allocationBitmapClusterNumber + bitmapClustersNeeded - 1,
+            rootDirClusterNumber
+        )
+        val fatSectorCount = (((lastReferencedCluster + 1) * 4 + 511) / 512).coerceAtLeast(1)
+        if (fatSectorCount > fatLength) {
+            throw IllegalArgumentException("FAT sector count ($fatSectorCount) exceeds allocated FAT length in sectors ($fatLength)")
+        }
+
+        val initialFat = ByteArray(fatSectorCount * 512)
         val fatBuf = ByteBuffer.wrap(initialFat).order(ByteOrder.LITTLE_ENDIAN)
         fatBuf.putInt(0xFFFFFFF8.toInt()) // Entry 0: Media type
         fatBuf.putInt(0xFFFFFFFF.toInt()) // Entry 1: End marker
@@ -277,20 +287,31 @@ object Fat32Formatter {
         // Clusters 2 .. (1 + bitmapClustersNeeded): bitmap chain
         for (i in 0 until bitmapClustersNeeded) {
             val cluster = allocationBitmapClusterNumber + i
-            if (cluster * 4 + 4 <= initialFat.size) {
-                fatBuf.position(cluster * 4)
-                if (i == bitmapClustersNeeded - 1) {
-                    fatBuf.putInt(0xFFFFFFFF.toInt()) // EOC for bitmap
-                } else {
-                    fatBuf.putInt(cluster + 1) // Next cluster in bitmap chain
-                }
+            val entryOffset = cluster * 4
+            if (entryOffset + 4 > initialFat.size) {
+                throw IllegalStateException("FAT region too small for cluster $cluster (needed offset ${entryOffset + 4}, available ${initialFat.size}) — increase fatSectors")
+            }
+            fatBuf.position(entryOffset)
+            if (i == bitmapClustersNeeded - 1) {
+                fatBuf.putInt(0xFFFFFFFF.toInt()) // EOC for bitmap
+            } else {
+                fatBuf.putInt(cluster + 1) // Next cluster in bitmap chain
             }
         }
 
         // Entry rootDirClusterNumber: Root dir EOF marker
-        if (rootDirClusterNumber * 4 + 4 <= initialFat.size) {
-            fatBuf.position(rootDirClusterNumber * 4)
-            fatBuf.putInt(0xFFFFFFFF.toInt())
+        val rootDirOffset = rootDirClusterNumber * 4
+        if (rootDirOffset + 4 > initialFat.size) {
+            throw IllegalStateException("FAT region too small for root directory cluster $rootDirClusterNumber (needed offset ${rootDirOffset + 4}, available ${initialFat.size}) — increase fatSectors")
+        }
+        fatBuf.position(rootDirOffset)
+        fatBuf.putInt(0xFFFFFFFF.toInt())
+
+        val initialFatSectors = mutableListOf<ByteArray>()
+        for (s in 0 until fatSectorCount) {
+            val sec = ByteArray(512)
+            System.arraycopy(initialFat, s * 512, sec, 0, 512)
+            initialFatSectors.add(sec)
         }
 
         // Allocation Bitmap: Multi-cluster byte array
@@ -338,7 +359,7 @@ object Fat32Formatter {
         return ExFatFormattedStructures(
             mainBootRegion = mainBootRegion,
             backupBootRegion = backupBootRegion,
-            initialFatSector = initialFat,
+            initialFatSectors = initialFatSectors,
             allocationBitmapClusters = allocationBitmap,
             rootDirCluster = rootDirCluster,
             fatOffsetSectors = fatOffset,
@@ -422,13 +443,14 @@ object Fat32Formatter {
             for (i in 0 until clustersNeeded) {
                 val c = currentCluster + i
                 val entryFatOffset = c * 4
-                if (entryFatOffset + 4 <= combinedFat.size) {
-                    fatBuf.position(entryFatOffset)
-                    if (i == clustersNeeded - 1) {
-                        fatBuf.putInt(0x0FFFFFFF) // End of chain (EOC)
-                    } else {
-                        fatBuf.putInt(c + 1) // Link to next cluster
-                    }
+                if (entryFatOffset + 4 > combinedFat.size) {
+                    throw IllegalStateException("FAT region too small for cluster $c (needed offset ${entryFatOffset + 4}, available ${combinedFat.size}) — increase fatSectors")
+                }
+                fatBuf.position(entryFatOffset)
+                if (i == clustersNeeded - 1) {
+                    fatBuf.putInt(0x0FFFFFFF) // End of chain (EOC)
+                } else {
+                    fatBuf.putInt(c + 1) // Link to next cluster
                 }
             }
 
@@ -651,23 +673,29 @@ object Fat32Formatter {
         bootBuf.putInt(efiBinaryPayload.size)
 
         // 4. Update FAT Table
-        if (efiCluster * 4 + 4 <= combinedFat.size) {
-            fatBuf.position(efiCluster * 4)
-            fatBuf.putInt(0x0FFFFFFF) // EOC for EFI dir
+        if (efiCluster * 4 + 4 > combinedFat.size) {
+            throw IllegalStateException("FAT region too small for EFI directory cluster $efiCluster (needed offset ${efiCluster * 4 + 4}, available ${combinedFat.size}) — increase fatSectors")
         }
-        if (bootCluster * 4 + 4 <= combinedFat.size) {
-            fatBuf.position(bootCluster * 4)
-            fatBuf.putInt(0x0FFFFFFF) // EOC for BOOT dir
+        fatBuf.position(efiCluster * 4)
+        fatBuf.putInt(0x0FFFFFFF) // EOC for EFI dir
+
+        if (bootCluster * 4 + 4 > combinedFat.size) {
+            throw IllegalStateException("FAT region too small for BOOT directory cluster $bootCluster (needed offset ${bootCluster * 4 + 4}, available ${combinedFat.size}) — increase fatSectors")
         }
+        fatBuf.position(bootCluster * 4)
+        fatBuf.putInt(0x0FFFFFFF) // EOC for BOOT dir
+
         for (i in 0 until payloadClusters) {
             val c = payloadStartCluster + i
-            if (c * 4 + 4 <= combinedFat.size) {
-                fatBuf.position(c * 4)
-                if (i == payloadClusters - 1) {
-                    fatBuf.putInt(0x0FFFFFFF) // EOC
-                } else {
-                    fatBuf.putInt(c + 1)
-                }
+            val entryFatOffset = c * 4
+            if (entryFatOffset + 4 > combinedFat.size) {
+                throw IllegalStateException("FAT region too small for cluster $c (needed offset ${entryFatOffset + 4}, available ${combinedFat.size}) — increase fatSectors")
+            }
+            fatBuf.position(entryFatOffset)
+            if (i == payloadClusters - 1) {
+                fatBuf.putInt(0x0FFFFFFF) // EOC
+            } else {
+                fatBuf.putInt(c + 1)
             }
         }
 
