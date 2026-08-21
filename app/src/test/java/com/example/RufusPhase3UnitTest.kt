@@ -38,7 +38,7 @@ class RufusPhase3UnitTest {
         val vbrBuf = ByteBuffer.wrap(vbr).order(ByteOrder.LITTLE_ENDIAN)
         assertEquals(2048L, vbrBuf.getLong(64)) // PartitionOffset
         assertEquals(totalSectors, vbrBuf.getLong(72)) // VolumeLength
-        assertEquals(4, vbrBuf.getInt(96)) // FirstClusterOfRootDirectory
+        assertEquals(exFat.rootDirClusterNumber, vbrBuf.getInt(96)) // FirstClusterOfRootDirectory
         assertEquals(9.toByte(), vbr[108]) // BytesPerSectorShift (2^9 = 512)
         assertEquals(3.toByte(), vbr[109]) // SectorsPerClusterShift (2^3 = 8)
 
@@ -61,15 +61,44 @@ class RufusPhase3UnitTest {
         }
 
         // 6. Verify Allocation Bitmap cluster
-        assertEquals(0x05.toByte(), exFat.allocationBitmapCluster[0]) // Bits 0 and 2 set
+        // For 1 cluster bitmap: cluster 2 (bitmap) and cluster 3 (root dir) are allocated -> bits 0 and 1 set -> 0x03
+        assertEquals(0x03.toByte(), exFat.allocationBitmapClusters[0])
 
-        // 7. Verify Root Directory cluster (Cluster 4)
+        // 7. Verify Root Directory cluster
         val rootDir = exFat.rootDirCluster
         assertEquals(0x83.toByte(), rootDir[0]) // Volume label entry
         assertEquals(7.toByte(), rootDir[1]) // Length of "MYEXFAT"
         assertEquals(0x81.toByte(), rootDir[32]) // Allocation bitmap entry
         val rootBuf = ByteBuffer.wrap(rootDir).order(ByteOrder.LITTLE_ENDIAN)
         assertEquals(2, rootBuf.getInt(32 + 20)) // FirstCluster = 2
+    }
+
+    @Test
+    fun testExFatMultiClusterBitmapSpanning() {
+        // Large partition with 1 sector per cluster = 512 bytes/cluster
+        // 100,000 sectors -> 100,000 clusters -> raw bitmap = 12,500 bytes
+        // Sector aligned bitmap = 12,800 bytes -> 25 clusters needed!
+        val totalSectors = 100000L
+        val exFat = Fat32Formatter.createCompleteExFatStructures(
+            totalPartitionSectors = totalSectors,
+            volumeLabel = "LARGEEXF",
+            sectorsPerCluster = 1,
+            startLbaOffset = 2048
+        )
+
+        assertTrue(exFat.bitmapClustersNeeded > 1)
+        assertEquals(2 + exFat.bitmapClustersNeeded, exFat.rootDirClusterNumber)
+
+        val fatBuf = ByteBuffer.wrap(exFat.initialFatSector).order(ByteOrder.LITTLE_ENDIAN)
+        assertEquals(0xFFFFFFF8.toInt(), fatBuf.getInt(0 * 4)) // Media type
+        assertEquals(0xFFFFFFFF.toInt(), fatBuf.getInt(1 * 4)) // End of chain
+
+        // Check bitmap FAT chain (cluster 2 -> 3 -> 4 ...)
+        for (c in 2 until (2 + exFat.bitmapClustersNeeded - 1)) {
+            if (c * 4 + 4 <= 512) {
+                assertEquals(c + 1, fatBuf.getInt(c * 4))
+            }
+        }
     }
 
     @Test
@@ -85,7 +114,7 @@ class RufusPhase3UnitTest {
 
         val result = Fat32Formatter.createRootDirectoryFiles(
             initialRootDirSector = fatStructures.initialRootDirSector,
-            initialFatSector = fatStructures.initialFatSector,
+            initialFatSectors = listOf(fatStructures.initialFatSector),
             initialFsInfoSector = fatStructures.fsInfo,
             rootDirLba = 2048L,
             sectorsPerCluster = 8,
@@ -126,7 +155,7 @@ class RufusPhase3UnitTest {
 
         val efiTree = Fat32Formatter.createEfiBootTree(
             initialRootDirSector = fatStructures.initialRootDirSector,
-            initialFatSector = fatStructures.initialFatSector,
+            initialFatSectors = listOf(fatStructures.initialFatSector),
             initialFsInfoSector = fatStructures.fsInfo,
             sectorsPerCluster = 8,
             efiBinaryPayload = shellPayload,

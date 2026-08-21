@@ -1,8 +1,6 @@
 package com.example.util
 
 import android.content.Context
-import com.example.usb.filesystem.Fat12FloppyParser
-import com.example.usb.filesystem.InjectedFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
@@ -11,16 +9,17 @@ import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
+import java.util.zip.ZipInputStream
 
 class BootloaderManager(private val context: Context) {
 
     companion object {
         // TODO: Maintainer: Update pinned download URLs and SHA-256 checksums per official upstream releases
-        const val EDK2_SHELL_URL = "https://github.com/pbatard/UEFI-Shell/releases/download/24H2/Shell_Full.efi"
-        const val EDK2_SHELL_SHA256 = "c081e69da5b34924775d71c828d119fae1ae8c9a33bb3571d7943c2cbe0a9058"
+        const val EDK2_SHELL_URL = "https://github.com/pbatard/UEFI-Shell/releases/download/26H1/shellx64.efi"
+        const val EDK2_SHELL_SHA256 = "4ea080ddd576117cd04f5c02d16712ea5d9249c0752214d8e4055e460d7b11e0"
 
-        const val FREEDOS_FDBOOT_URL = "https://www.ibiblio.org/pub/micro/pc-stuff/freedos/files/distributions/1.3/official/FD13-FloppyEdition/fdboot.img"
-        const val FREEDOS_FDBOOT_SHA256 = "d6e6ea3dbb30fcb7bc1c9a622a59a43588970e5b565a587c48529f7cf479860b"
+        const val FREEDOS_LITEUSB_URL = "https://www.ibiblio.org/pub/micro/pc-stuff/freedos/files/distributions/1.3/official/FD13-LiteUSB.zip"
+        const val FREEDOS_LITEUSB_SHA256 = "64a934585087ccd91a18c55e20ee01f5f6762be712eeaa5f456be543778f9f7e"
     }
 
     private val bootloaderDir: File
@@ -33,7 +32,7 @@ class BootloaderManager(private val context: Context) {
         isCancelled: () -> Boolean,
         onProgress: suspend (Int, String) -> Unit
     ): Result<ByteArray> = withContext(Dispatchers.IO) {
-        val cachedFile = File(bootloaderDir, "uefishell.efi")
+        val cachedFile = File(bootloaderDir, "shellx64.efi")
 
         // 1. Check local cache
         if (cachedFile.exists() && cachedFile.length() > 0) {
@@ -47,7 +46,12 @@ class BootloaderManager(private val context: Context) {
 
         // 2. Check bundled asset fallback
         try {
-            context.assets.open("bootloaders/uefishell.efi").use { stream ->
+            val assetStream = try {
+                context.assets.open("bootloaders/shellx64.efi")
+            } catch (e: Exception) {
+                context.assets.open("bootloaders/uefishell.efi")
+            }
+            assetStream.use { stream ->
                 val assetBytes = stream.readBytes()
                 if (assetBytes.size > 512) {
                     val assetHash = computeSha256(assetBytes)
@@ -82,74 +86,101 @@ class BootloaderManager(private val context: Context) {
     }
 
     /**
-     * Retrieves FreeDOS payload files (KERNEL.SYS, COMMAND.COM, and config files) by downloading
-     * and parsing the official fdboot.img floppy image in memory.
+     * Retrieves official FreeDOS 1.3 LiteUSB disk image (FD13LITE.img) by downloading and extracting
+     * the official FD13-LiteUSB.zip archive in memory, verifying size (32MB) and SHA-256 integrity.
      */
-    suspend fun getFreeDosPayloadFiles(
+    suspend fun getFreeDosUsbImage(
         isCancelled: () -> Boolean,
         onProgress: suspend (Int, String) -> Unit
-    ): Result<List<InjectedFile>> = withContext(Dispatchers.IO) {
-        val cachedImageFile = File(bootloaderDir, "fdboot.img")
-        var imageBytes: ByteArray? = null
+    ): Result<ByteArray> = withContext(Dispatchers.IO) {
+        val cachedImageFile = File(bootloaderDir, "FD13LITE.img")
+        val expectedExtractedSha256 = "e6b9a2e7694d92209ea3ab2a99ca820de1bc9fe3dd3360350b6a0103967bf58b"
+        val expectedExtractedSize = 33554432L // Exactly 32 MB
 
         // 1. Check local cache
-        if (cachedImageFile.exists() && cachedImageFile.length() > 0) {
+        if (cachedImageFile.exists() && cachedImageFile.length() == expectedExtractedSize) {
             val cachedBytes = cachedImageFile.readBytes()
             val cachedHash = computeSha256(cachedBytes)
-            if (cachedHash.equals(FREEDOS_FDBOOT_SHA256, ignoreCase = true)) {
-                onProgress(100, "Loaded cached FreeDOS fdboot.img (SHA-256 verified)")
-                imageBytes = cachedBytes
+            if (cachedHash.equals(expectedExtractedSha256, ignoreCase = true)) {
+                onProgress(100, "Loaded cached FreeDOS 1.3 LiteUSB image (SHA-256 verified)")
+                return@withContext Result.success(cachedBytes)
             }
         }
 
-        // 2. Download if not cached
-        if (imageBytes == null) {
-            onProgress(0, "Downloading FreeDOS 1.3 floppy image (fdboot.img)...")
-            val downloadResult = downloadWithHashPin(
-                urlString = FREEDOS_FDBOOT_URL,
-                expectedSha256 = FREEDOS_FDBOOT_SHA256,
-                displayName = "FreeDOS fdboot.img",
-                isCancelled = isCancelled,
-                onProgress = onProgress
-            )
-
-            if (downloadResult.isFailure) {
-                return@withContext Result.failure(downloadResult.exceptionOrNull() ?: Exception("Failed downloading FreeDOS image"))
-            }
-            val downloadedBytes = downloadResult.getOrThrow()
-            try {
-                cachedImageFile.writeBytes(downloadedBytes)
-            } catch (e: Exception) {}
-            imageBytes = downloadedBytes
-        }
-
-        onProgress(90, "Extracting FreeDOS kernel and system files from floppy image...")
-        val extractedFiles = Fat12FloppyParser.extractAllFiles(imageBytes)
-
-        val kernelSys = extractedFiles["KERNEL.SYS"]
-        val commandCom = extractedFiles["COMMAND.COM"]
-
-        if (kernelSys == null || commandCom == null) {
-            return@withContext Result.failure(
-                IllegalStateException("FreeDOS floppy image missing required KERNEL.SYS or COMMAND.COM files.")
-            )
-        }
-
-        // Generate boot configuration files
-        val autoexecBat = "@echo off\r\nSET DOSDIR=\\\r\nSET PATH=\\;\\BIN\r\necho Welcome to FreeDOS (Rufus Bootable USB)\r\n".toByteArray(Charsets.US_ASCII)
-        val configSys = "SWITCHES=/F\r\nDOS=HIGH,UMB\r\nDOSDATA=UMB\r\nDEVICE=\\KERNEL.SYS\r\nSHELL=\\COMMAND.COM /E:1024 /P\r\n".toByteArray(Charsets.US_ASCII)
-        val fdConfigSys = "SWITCHES=/F\r\nDOS=HIGH,UMB\r\nDOSDATA=UMB\r\nDEVICE=\\KERNEL.SYS\r\nSHELL=\\COMMAND.COM /E:1024 /P\r\n".toByteArray(Charsets.US_ASCII)
-
-        val payloadList = listOf(
-            InjectedFile(fileName83 = "KERNEL.SYS", content = kernelSys),
-            InjectedFile(fileName83 = "COMMAND.COM", content = commandCom),
-            InjectedFile(fileName83 = "AUTOEXEC.BAT", content = autoexecBat),
-            InjectedFile(fileName83 = "CONFIG.SYS", content = configSys),
-            InjectedFile(fileName83 = "FDCONFIG.SYS", content = fdConfigSys)
+        // 2. Download zip via downloadWithHashPin
+        onProgress(0, "Downloading FreeDOS 1.3 LiteUSB distribution archive...")
+        val zipResult = downloadWithHashPin(
+            urlString = FREEDOS_LITEUSB_URL,
+            expectedSha256 = FREEDOS_LITEUSB_SHA256,
+            displayName = "FreeDOS 1.3 LiteUSB zip",
+            isCancelled = isCancelled,
+            onProgress = onProgress
         )
 
-        onProgress(100, "Extracted ${payloadList.size} FreeDOS files successfully")
-        return@withContext Result.success(payloadList)
+        if (zipResult.isFailure) {
+            return@withContext Result.failure(zipResult.exceptionOrNull() ?: Exception("Failed downloading FreeDOS archive"))
+        }
+
+        if (isCancelled()) {
+            return@withContext Result.failure(IllegalStateException("Operation cancelled by user."))
+        }
+
+        onProgress(90, "Extracting FD13LITE.img from archive...")
+        val zipBytes = zipResult.getOrThrow()
+        var extractedImgBytes: ByteArray? = null
+
+        try {
+            ZipInputStream(zipBytes.inputStream()).use { zis ->
+                var entry = zis.nextEntry
+                while (entry != null) {
+                    val name = entry.name
+                    if (name.equals("FD13LITE.img", ignoreCase = true) ||
+                        name.endsWith("/FD13LITE.img", ignoreCase = true) ||
+                        name.endsWith("\\FD13LITE.img", ignoreCase = true)
+                    ) {
+                        val baos = ByteArrayOutputStream()
+                        val buf = ByteArray(64 * 1024)
+                        var read: Int
+                        while (zis.read(buf).also { read = it } > 0) {
+                            if (isCancelled()) {
+                                return@withContext Result.failure(IllegalStateException("Operation cancelled by user."))
+                            }
+                            baos.write(buf, 0, read)
+                        }
+                        extractedImgBytes = baos.toByteArray()
+                        break
+                    }
+                    entry = zis.nextEntry
+                }
+            }
+        } catch (e: Exception) {
+            return@withContext Result.failure(IllegalStateException("Failed extracting FD13LITE.img: ${e.message}", e))
+        }
+
+        if (extractedImgBytes == null) {
+            return@withContext Result.failure(IllegalStateException("Archive does not contain FD13LITE.img"))
+        }
+
+        val extracted = extractedImgBytes!!
+        if (extracted.size.toLong() != expectedExtractedSize) {
+            return@withContext Result.failure(
+                IllegalStateException("FD13LITE.img size mismatch: expected $expectedExtractedSize bytes, got ${extracted.size} bytes")
+            )
+        }
+
+        val imgHash = computeSha256(extracted)
+        if (!imgHash.equals(expectedExtractedSha256, ignoreCase = true)) {
+            return@withContext Result.failure(
+                SecurityException("FD13LITE.img SHA-256 verification failed! Expected: $expectedExtractedSha256, got: $imgHash")
+            )
+        }
+
+        try {
+            cachedImageFile.writeBytes(extracted)
+        } catch (e: Exception) {}
+
+        onProgress(100, "FreeDOS 1.3 LiteUSB image verified successfully (${extracted.size} bytes)")
+        Result.success(extracted)
     }
 
     private suspend fun downloadWithHashPin(

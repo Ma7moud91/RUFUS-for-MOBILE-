@@ -665,330 +665,295 @@ class RealRufusWriteEngineImpl(
                     return
                 }
 
-                logRepository.log("Zeroing initial and backup partition sectors...", LogLevel.INFO, "PARTITION")
-                emitProgress(WriteProgress.Partitioning(percentage = 15, message = "Zeroing partition sectors..."))
-
-                val zeroSectorChunk = ByteArray(driver.sectorSize * 34)
-                writeSectorsWithRetry(driver, 0, zeroSectorChunk, emitProgress)
-                if (driver.totalSectors > 68) {
-                    writeSectorsWithRetry(driver, driver.totalSectors - 34, zeroSectorChunk, emitProgress)
+                // Guard: Block bootloader selection on exFAT (exFAT does not support BIOS/UEFI bootloader payloads)
+                if (config.fileSystem == FileSystem.EXFAT && (config.bootSelectionType == BootSelectionType.UEFI_SHELL || config.bootSelectionType == BootSelectionType.FREEDOS || config.bootSelectionType == BootSelectionType.MSDOS)) {
+                    logRepository.log("ERROR: Bootloader '${config.bootSelectionType.label}' is not supported on exFAT. Please select FAT32 or Non-bootable.", LogLevel.ERROR, "FORMAT")
+                    emitProgress(WriteProgress.Error(message = "Bootloader '${config.bootSelectionType.label}' is not supported on exFAT. Please select FAT32 or Non-bootable."))
+                    return
                 }
 
-                logRepository.log("Creating ${config.partitionScheme.label} partition table...", LogLevel.INFO, "PARTITION")
-                emitProgress(WriteProgress.Partitioning(percentage = 50, message = "Writing ${config.partitionScheme.label} partition headers..."))
-
-                val isEsp = (config.bootSelectionType == BootSelectionType.UEFI_SHELL || config.targetSystem == TargetSystem.UEFI_NON_CSM)
-
-                if (config.partitionScheme == PartitionScheme.GPT) {
-                    val pmbr = MbrGenerator.createProtectiveMbr(driver.totalSectors)
-                    val gptStructures = GptGenerator.createCompleteGptStructures(
-                        totalSectors = driver.totalSectors,
-                        volumeLabel = config.volumeLabel,
-                        isEfiEsp = isEsp
-                    )
-
-                    val gptWritten = writeSectorsWithRetry(driver, 0, pmbr, emitProgress) &&
-                                     writeSectorsWithRetry(driver, 1, gptStructures.primaryHeader, emitProgress) &&
-                                     writeSectorsWithRetry(driver, 2, gptStructures.primaryEntryArray, emitProgress) &&
-                                     writeSectorsWithRetry(driver, driver.totalSectors - 33, gptStructures.backupEntryArray, emitProgress) &&
-                                     writeSectorsWithRetry(driver, driver.totalSectors - 1, gptStructures.backupHeader, emitProgress)
-
-                    if (!gptWritten) {
-                        logRepository.log("Failed to write Primary/Backup GPT partition headers to physical flash media.", LogLevel.ERROR, "PARTITION")
-                        emitProgress(WriteProgress.Error(message = "Hardware GPT partition write failed at LBA 0..33"))
-                        return
-                    }
-                    logRepository.log("Written Protective MBR (LBA 0), Primary GPT (LBA 1..33), and Backup GPT (LBA ${driver.totalSectors - 33}..${driver.totalSectors - 1}).", LogLevel.SUCCESS, "PARTITION")
-                } else {
-                    val partitionType = when (config.fileSystem) {
-                        FileSystem.FAT32, FileSystem.FAT -> MbrGenerator.PARTITION_TYPE_FAT32_LBA
-                        FileSystem.NTFS, FileSystem.EXFAT -> MbrGenerator.PARTITION_TYPE_NTFS_EXFAT
-                        FileSystem.EXT4, FileSystem.EXT2, FileSystem.EXT3 -> MbrGenerator.PARTITION_TYPE_LINUX_NATIVE
-                        else -> MbrGenerator.PARTITION_TYPE_FAT32_LBA
-                    }
-                    val mbr = MbrGenerator.createStandardMbr(
-                        partitionType = partitionType,
-                        startLba = startPartitionLba.toInt(),
-                        totalSectors = driver.totalSectors,
-                        isBootable = true
-                    )
-                    val mbrWritten = writeSectorsWithRetry(driver, 0, mbr, emitProgress)
-                    if (!mbrWritten) {
-                        logRepository.log("Failed to write Standard MBR to physical flash media.", LogLevel.ERROR, "PARTITION")
-                        emitProgress(WriteProgress.Error(message = "Hardware MBR write failed at LBA 0"))
-                        return
-                    }
-                    logRepository.log("Written Standard Master Boot Record (LBA 0).", LogLevel.SUCCESS, "PARTITION")
-                }
-                emitProgress(WriteProgress.Partitioning(percentage = 100, message = "Partition table created."))
-
-                logRepository.log("Formatting primary partition with ${config.fileSystem.label} (Cluster: ${config.clusterSize} B)...", LogLevel.INFO, "FORMAT")
-                emitProgress(WriteProgress.Formatting(percentage = 40, message = "Writing Volume Boot Record & filesystem structures..."))
-
-                val totalPartitionSectors = (driver.totalSectors - startPartitionLba).coerceAtLeast(1024L)
-                val sectorsPerCluster = (config.clusterSize / driver.sectorSize).coerceAtLeast(1)
-                val startDataLba: Long
                 val bootloaderManager = BootloaderManager(context)
 
-                if (config.fileSystem == FileSystem.EXFAT) {
-                    val exFatStructures = Fat32Formatter.createCompleteExFatStructures(
-                        totalPartitionSectors = totalPartitionSectors,
-                        volumeLabel = config.volumeLabel,
-                        sectorsPerCluster = sectorsPerCluster,
-                        startLbaOffset = startPartitionLba.toInt()
+                if (config.bootSelectionType == BootSelectionType.FREEDOS) {
+                    // FREEDOS MODE: Raw-DD write the official FreeDOS 1.3 LiteUSB disk image (FD13LITE.img) from LBA 0
+                    logRepository.log("Fetching official FreeDOS 1.3 LiteUSB distribution disk image (FD13LITE.img)...", LogLevel.INFO, "BOOTLOADER")
+                    val fdResult = bootloaderManager.getFreeDosUsbImage(
+                        isCancelled = { isCancelled.get() },
+                        onProgress = { pct, msg -> emitProgress(WriteProgress.Analyzing(message = msg)) }
                     )
 
-                    val writeMainBoot = writeSectorsWithRetry(driver, startPartitionLba, exFatStructures.mainBootRegion, emitProgress)
-                    val writeBackupBoot = writeSectorsWithRetry(driver, startPartitionLba + 12, exFatStructures.backupBootRegion, emitProgress)
-                    val writeFatTable = writeSectorsWithRetry(driver, startPartitionLba + exFatStructures.fatOffsetSectors, exFatStructures.initialFatSector, emitProgress)
-                    val bitmapLba = startPartitionLba + exFatStructures.clusterHeapOffsetSectors + ((exFatStructures.allocationBitmapClusterNumber - 2) * exFatStructures.sectorsPerCluster)
-                    val writeBitmap = writeSectorsWithRetry(driver, bitmapLba, exFatStructures.allocationBitmapCluster, emitProgress)
-                    val rootDirLba = startPartitionLba + exFatStructures.clusterHeapOffsetSectors + ((exFatStructures.rootDirClusterNumber - 2) * exFatStructures.sectorsPerCluster)
-                    val writeRootDir = writeSectorsWithRetry(driver, rootDirLba, exFatStructures.rootDirCluster, emitProgress)
-
-                    if (!writeMainBoot || !writeBackupBoot || !writeFatTable || !writeBitmap || !writeRootDir) {
-                        logRepository.log("Failed to write exFAT volume structures to flash media.", LogLevel.ERROR, "EXFAT")
-                        emitProgress(WriteProgress.Error(message = "Hardware write failed while initializing exFAT filesystem structures."))
+                    if (fdResult.isFailure) {
+                        val err = fdResult.exceptionOrNull()?.message ?: "FreeDOS image retrieval failed"
+                        logRepository.log("ERROR: $err", LogLevel.ERROR, "BOOTLOADER")
+                        emitProgress(WriteProgress.Error(message = err))
                         return
                     }
 
-                    logRepository.log("exFAT Main Boot Region (VBR + Extended Boot Sectors + OEM + Checksum) written at LBA $startPartitionLba..${startPartitionLba + 11}.", LogLevel.SUCCESS, "EXFAT")
-                    logRepository.log("exFAT Backup Boot Region written at LBA ${startPartitionLba + 12}..${startPartitionLba + 23}.", LogLevel.SUCCESS, "EXFAT")
-                    logRepository.log("exFAT FAT Table (Offset: ${exFatStructures.fatOffsetSectors} sectors, Length: ${exFatStructures.fatLengthSectors} sectors) initialized.", LogLevel.SUCCESS, "EXFAT")
-                    logRepository.log("exFAT Allocation Bitmap (Cluster 2) written at LBA $bitmapLba.", LogLevel.SUCCESS, "EXFAT")
-                    logRepository.log("exFAT Root Directory (Cluster 4) initialized with Volume Label '${config.volumeLabel}' at LBA $rootDirLba.", LogLevel.SUCCESS, "EXFAT")
-
-                    startDataLba = startPartitionLba + exFatStructures.clusterHeapOffsetSectors + ((5 - 2) * exFatStructures.sectorsPerCluster)
-                } else {
-                    // FAT32 / FAT
-                    val fatStructures = Fat32Formatter.createCompleteFat32Structures(
-                        totalPartitionSectors = totalPartitionSectors,
-                        volumeLabel = config.volumeLabel,
-                        sectorsPerCluster = sectorsPerCluster,
-                        startLbaOffset = startPartitionLba.toInt()
+                    val fdImageBytes = fdResult.getOrThrow()
+                    logRepository.log("Flashing official FreeDOS 1.3 LiteUSB raw disk image (${fdImageBytes.size} bytes) in raw-DD mode starting at LBA 0...", LogLevel.INFO, "BOOTLOADER")
+                    emitProgress(
+                        WriteProgress.Writing(
+                            percentage = 0,
+                            currentFile = "FD13LITE.img",
+                            speedMbPerSec = 45.0,
+                            remainingTimeSec = 0L,
+                            bytesWritten = 0L,
+                            totalBytes = fdImageBytes.size.toLong()
+                        )
                     )
 
-                    var rootDirSector = fatStructures.initialRootDirSector
-                    var fatTableSector = fatStructures.initialFatSector
-                    var fsInfoSector = fatStructures.fsInfo
-                    val rootDirLba = startPartitionLba + fatStructures.reservedSectors + (fatStructures.sectorsPerFat.toLong() * 2)
-                    var clustersInjected = 0
-
-                    if (config.isWindowsImage || config.bootSelectionType == BootSelectionType.WINDOWS_TO_GO) {
-                        logRepository.log("Creating FAT32 directory entry and FAT chains for AutoUnattend.xml...", LogLevel.INFO, "WIN-OOBE")
-                        val unattendXml = WindowsUnattendGenerator.generateAutoUnattendXml(config.windowsUserExperience)
-                        val xmlBytes = unattendXml.toByteArray(Charsets.UTF_8)
-                        val injected = Fat32Formatter.createRootDirectoryFile(
-                            initialRootDirSector = rootDirSector,
-                            initialFatSector = fatTableSector,
-                            initialFsInfoSector = fsInfoSector,
-                            rootDirLba = rootDirLba,
-                            sectorsPerCluster = fatStructures.sectorsPerCluster,
-                            fileName83 = "AUTOUNATXML",
-                            fileContent = xmlBytes,
-                            startCluster = 3
+                    val chunkSize = 64 * 1024
+                    var currentLba = 0L
+                    var offset = 0
+                    while (offset < fdImageBytes.size && !isCancelled.get()) {
+                        val len = Math.min(chunkSize, fdImageBytes.size - offset)
+                        val chunk = ByteArray(len)
+                        System.arraycopy(fdImageBytes, offset, chunk, 0, len)
+                        val chunkWritten = writeSectorsWithRetry(driver, currentLba, chunk, emitProgress)
+                        if (!chunkWritten) {
+                            logRepository.log("Failed writing FreeDOS image chunk at LBA $currentLba.", LogLevel.ERROR, "BOOTLOADER")
+                            emitProgress(WriteProgress.Error(message = "Hardware write failed at LBA $currentLba during FreeDOS flashing."))
+                            return
+                        }
+                        val sectorsWritten = len / driver.sectorSize
+                        currentLba += sectorsWritten
+                        offset += len
+                        val pct = ((offset.toDouble() / fdImageBytes.size) * 100).toInt().coerceIn(0, 100)
+                        emitProgress(
+                            WriteProgress.Writing(
+                                percentage = pct,
+                                currentFile = "FD13LITE.img",
+                                speedMbPerSec = 45.0,
+                                remainingTimeSec = 0L,
+                                bytesWritten = offset.toLong(),
+                                totalBytes = fdImageBytes.size.toLong()
+                            )
                         )
-                        rootDirSector = injected.updatedRootDirSector
-                        fatTableSector = injected.updatedFatSector
-                        fsInfoSector = injected.updatedFsInfoSector
-                        clustersInjected = injected.clustersAllocated
-
-                        val cluster3Lba = rootDirLba + fatStructures.sectorsPerCluster
-                        writeSectorsWithRetry(driver, cluster3Lba, xmlBytes, emitProgress)
-                        logRepository.log("AutoUnattend.xml (${xmlBytes.size} bytes) written across $clustersInjected cluster(s) starting at LBA $cluster3Lba.", LogLevel.SUCCESS, "WIN-OOBE")
                     }
 
-                    // Install Bootloader payload files into FAT32 filesystem
-                    when (config.bootSelectionType) {
-                        BootSelectionType.UEFI_SHELL -> {
-                            logRepository.log("Fetching official EDK2 UEFI Shell (x64) release binary...", LogLevel.INFO, "BOOTLOADER")
-                            val shellResult = bootloaderManager.getUefiShellBinary(
-                                isCancelled = { isCancelled.get() },
-                                onProgress = { pct, msg -> emitProgress(WriteProgress.Analyzing(message = msg)) }
-                            )
+                    sourceSha256Digest.update(fdImageBytes)
+                    bytesWritten = fdImageBytes.size.toLong()
+                    verifyStartLba = 0L
+                } else {
+                    logRepository.log("Zeroing initial and backup partition sectors...", LogLevel.INFO, "PARTITION")
+                    emitProgress(WriteProgress.Partitioning(percentage = 15, message = "Zeroing partition sectors..."))
 
-                            if (shellResult.isFailure) {
-                                val err = shellResult.exceptionOrNull()?.message ?: "UEFI Shell download failed"
-                                logRepository.log("ERROR: $err", LogLevel.ERROR, "BOOTLOADER")
-                                emitProgress(WriteProgress.Error(message = err))
-                                return
-                            }
+                    val zeroSectorChunk = ByteArray(driver.sectorSize * 34)
+                    writeSectorsWithRetry(driver, 0, zeroSectorChunk, emitProgress)
+                    if (driver.totalSectors > 68) {
+                        writeSectorsWithRetry(driver, driver.totalSectors - 34, zeroSectorChunk, emitProgress)
+                    }
 
-                            val shellBytes = shellResult.getOrThrow()
-                            logRepository.log("Building UEFI ESP directory tree (\\EFI\\BOOT\\BOOTX64.EFI)...", LogLevel.INFO, "BOOTLOADER")
-                            val efiTree = Fat32Formatter.createEfiBootTree(
-                                initialRootDirSector = rootDirSector,
-                                initialFatSector = fatTableSector,
-                                initialFsInfoSector = fsInfoSector,
-                                sectorsPerCluster = fatStructures.sectorsPerCluster,
-                                efiBinaryPayload = shellBytes,
-                                startCluster = 3 + clustersInjected
-                            )
+                    logRepository.log("Creating ${config.partitionScheme.label} partition table...", LogLevel.INFO, "PARTITION")
+                    emitProgress(WriteProgress.Partitioning(percentage = 50, message = "Writing ${config.partitionScheme.label} partition headers..."))
 
-                            rootDirSector = efiTree.updatedRootDirSector
-                            fatTableSector = efiTree.updatedFatSector
-                            fsInfoSector = efiTree.updatedFsInfoSector
+                    val isEsp = (config.bootSelectionType == BootSelectionType.UEFI_SHELL || config.targetSystem == TargetSystem.UEFI_NON_CSM)
 
-                            val efiDirLba = rootDirLba + (fatStructures.sectorsPerCluster.toLong() * (efiTree.efiDirCluster - 2))
-                            val bootDirLba = rootDirLba + (fatStructures.sectorsPerCluster.toLong() * (efiTree.bootDirCluster - 2))
-                            val payloadLba = rootDirLba + (fatStructures.sectorsPerCluster.toLong() * (efiTree.payloadStartCluster - 2))
+                    if (config.partitionScheme == PartitionScheme.GPT) {
+                        val pmbr = MbrGenerator.createProtectiveMbr(driver.totalSectors)
+                        val gptStructures = GptGenerator.createCompleteGptStructures(
+                            totalSectors = driver.totalSectors,
+                            volumeLabel = config.volumeLabel,
+                            isEfiEsp = isEsp
+                        )
 
-                            writeSectorsWithRetry(driver, efiDirLba, efiTree.efiDirClusterSector, emitProgress)
-                            writeSectorsWithRetry(driver, bootDirLba, efiTree.bootDirClusterSector, emitProgress)
-                            writeSectorsWithRetry(driver, payloadLba, shellBytes, emitProgress)
+                        val gptWritten = writeSectorsWithRetry(driver, 0, pmbr, emitProgress) &&
+                                         writeSectorsWithRetry(driver, 1, gptStructures.primaryHeader, emitProgress) &&
+                                         writeSectorsWithRetry(driver, 2, gptStructures.primaryEntryArray, emitProgress) &&
+                                         writeSectorsWithRetry(driver, driver.totalSectors - 33, gptStructures.backupEntryArray, emitProgress) &&
+                                         writeSectorsWithRetry(driver, driver.totalSectors - 1, gptStructures.backupHeader, emitProgress)
 
-                            sourceSha256Digest.update(shellBytes)
-                            bytesWritten = shellBytes.size.toLong()
-                            verifyStartLba = payloadLba
-
-                            logRepository.log("EDK2 UEFI Shell binary (${shellBytes.size} bytes) installed at \\EFI\\BOOT\\BOOTX64.EFI (Cluster ${efiTree.payloadStartCluster}, LBA $payloadLba).", LogLevel.SUCCESS, "BOOTLOADER")
+                        if (!gptWritten) {
+                            logRepository.log("Failed to write Primary/Backup GPT partition headers to physical flash media.", LogLevel.ERROR, "PARTITION")
+                            emitProgress(WriteProgress.Error(message = "Hardware GPT partition write failed at LBA 0..33"))
+                            return
                         }
-                        BootSelectionType.FREEDOS -> {
-                            logRepository.log("Fetching official FreeDOS 1.3 system distribution floppy image...", LogLevel.INFO, "BOOTLOADER")
-                            val fdResult = bootloaderManager.getFreeDosPayloadFiles(
-                                isCancelled = { isCancelled.get() },
-                                onProgress = { pct, msg -> emitProgress(WriteProgress.Analyzing(message = msg)) }
-                            )
+                        logRepository.log("Written Protective MBR (LBA 0), Primary GPT (LBA 1..33), and Backup GPT (LBA ${driver.totalSectors - 33}..${driver.totalSectors - 1}).", LogLevel.SUCCESS, "PARTITION")
+                    } else {
+                        val partitionType = when (config.fileSystem) {
+                            FileSystem.FAT32, FileSystem.FAT -> MbrGenerator.PARTITION_TYPE_FAT32_LBA
+                            FileSystem.NTFS, FileSystem.EXFAT -> MbrGenerator.PARTITION_TYPE_NTFS_EXFAT
+                            FileSystem.EXT4, FileSystem.EXT2, FileSystem.EXT3 -> MbrGenerator.PARTITION_TYPE_LINUX_NATIVE
+                            else -> MbrGenerator.PARTITION_TYPE_FAT32_LBA
+                        }
+                        val mbr = MbrGenerator.createStandardMbr(
+                            partitionType = partitionType,
+                            startLba = startPartitionLba.toInt(),
+                            totalSectors = driver.totalSectors,
+                            isBootable = true
+                        )
+                        val mbrWritten = writeSectorsWithRetry(driver, 0, mbr, emitProgress)
+                        if (!mbrWritten) {
+                            logRepository.log("Failed to write Standard MBR to physical flash media.", LogLevel.ERROR, "PARTITION")
+                            emitProgress(WriteProgress.Error(message = "Hardware MBR write failed at LBA 0"))
+                            return
+                        }
+                        logRepository.log("Written Standard Master Boot Record (LBA 0).", LogLevel.SUCCESS, "PARTITION")
+                    }
+                    emitProgress(WriteProgress.Partitioning(percentage = 100, message = "Partition table created."))
 
-                            if (fdResult.isFailure) {
-                                val err = fdResult.exceptionOrNull()?.message ?: "FreeDOS payload extraction failed"
-                                logRepository.log("ERROR: $err", LogLevel.ERROR, "BOOTLOADER")
-                                emitProgress(WriteProgress.Error(message = err))
-                                return
-                            }
+                    logRepository.log("Formatting primary partition with ${config.fileSystem.label} (Cluster: ${config.clusterSize} B)...", LogLevel.INFO, "FORMAT")
+                    emitProgress(WriteProgress.Formatting(percentage = 40, message = "Writing Volume Boot Record & filesystem structures..."))
 
-                            val fdFiles = fdResult.getOrThrow()
-                            logRepository.log("Injecting FreeDOS files: ${fdFiles.joinToString { it.fileName83 }} into FAT32 root directory...", LogLevel.INFO, "BOOTLOADER")
-                            val startCluster = 3 + clustersInjected
-                            val fdInjected = Fat32Formatter.createRootDirectoryFiles(
+                    val totalPartitionSectors = (driver.totalSectors - startPartitionLba).coerceAtLeast(1024L)
+                    val sectorsPerCluster = (config.clusterSize / driver.sectorSize).coerceAtLeast(1)
+                    val startDataLba: Long
+
+                    if (config.fileSystem == FileSystem.EXFAT) {
+                        val exFatStructures = Fat32Formatter.createCompleteExFatStructures(
+                            totalPartitionSectors = totalPartitionSectors,
+                            volumeLabel = config.volumeLabel,
+                            sectorsPerCluster = sectorsPerCluster,
+                            startLbaOffset = startPartitionLba.toInt()
+                        )
+
+                        val writeMainBoot = writeSectorsWithRetry(driver, startPartitionLba, exFatStructures.mainBootRegion, emitProgress)
+                        val writeBackupBoot = writeSectorsWithRetry(driver, startPartitionLba + 12, exFatStructures.backupBootRegion, emitProgress)
+                        val writeFatTable = writeSectorsWithRetry(driver, startPartitionLba + exFatStructures.fatOffsetSectors, exFatStructures.initialFatSector, emitProgress)
+                        val bitmapLba = startPartitionLba + exFatStructures.clusterHeapOffsetSectors + ((exFatStructures.allocationBitmapClusterNumber - 2) * exFatStructures.sectorsPerCluster)
+                        val writeBitmap = writeSectorsWithRetry(driver, bitmapLba, exFatStructures.allocationBitmapClusters, emitProgress)
+                        val rootDirLba = startPartitionLba + exFatStructures.clusterHeapOffsetSectors + ((exFatStructures.rootDirClusterNumber - 2) * exFatStructures.sectorsPerCluster)
+                        val writeRootDir = writeSectorsWithRetry(driver, rootDirLba, exFatStructures.rootDirCluster, emitProgress)
+
+                        if (!writeMainBoot || !writeBackupBoot || !writeFatTable || !writeBitmap || !writeRootDir) {
+                            logRepository.log("Failed to write exFAT volume structures to flash media.", LogLevel.ERROR, "EXFAT")
+                            emitProgress(WriteProgress.Error(message = "Hardware write failed while initializing exFAT filesystem structures."))
+                            return
+                        }
+
+                        logRepository.log("exFAT Main Boot Region (VBR + Extended Boot Sectors + OEM + Checksum) written at LBA $startPartitionLba..${startPartitionLba + 11}.", LogLevel.SUCCESS, "EXFAT")
+                        logRepository.log("exFAT Backup Boot Region written at LBA ${startPartitionLba + 12}..${startPartitionLba + 23}.", LogLevel.SUCCESS, "EXFAT")
+                        logRepository.log("exFAT FAT Table (Offset: ${exFatStructures.fatOffsetSectors} sectors, Length: ${exFatStructures.fatLengthSectors} sectors) initialized.", LogLevel.SUCCESS, "EXFAT")
+                        logRepository.log("exFAT Allocation Bitmap (${exFatStructures.bitmapClustersNeeded} cluster(s)) written at LBA $bitmapLba.", LogLevel.SUCCESS, "EXFAT")
+                        logRepository.log("exFAT Root Directory (Cluster ${exFatStructures.rootDirClusterNumber}) initialized with Volume Label '${config.volumeLabel}' at LBA $rootDirLba.", LogLevel.SUCCESS, "EXFAT")
+
+                        startDataLba = startPartitionLba + exFatStructures.clusterHeapOffsetSectors + ((exFatStructures.rootDirClusterNumber + 1 - 2) * exFatStructures.sectorsPerCluster)
+
+                        val defaultStub = ByteArray(32 * 1024)
+                        "RUFUS NON-BOOTABLE EXFAT DATA PARTITION".toByteArray(Charsets.US_ASCII).copyInto(defaultStub, 0)
+                        writeSectorsWithRetry(driver, startDataLba, defaultStub, emitProgress)
+                        sourceSha256Digest.update(defaultStub)
+                        bytesWritten = defaultStub.size.toLong()
+                        verifyStartLba = startDataLba
+                    } else {
+                        // FAT32 / FAT
+                        val fatStructures = Fat32Formatter.createCompleteFat32Structures(
+                            totalPartitionSectors = totalPartitionSectors,
+                            volumeLabel = config.volumeLabel,
+                            sectorsPerCluster = sectorsPerCluster,
+                            startLbaOffset = startPartitionLba.toInt()
+                        )
+
+                        var rootDirSector = fatStructures.initialRootDirSector
+                        var fatTableSector = fatStructures.initialFatSector
+                        var fsInfoSector = fatStructures.fsInfo
+                        val rootDirLba = startPartitionLba + fatStructures.reservedSectors + (fatStructures.sectorsPerFat.toLong() * 2)
+                        var clustersInjected = 0
+
+                        if (config.isWindowsImage || config.bootSelectionType == BootSelectionType.WINDOWS_TO_GO) {
+                            logRepository.log("Creating FAT32 directory entry and FAT chains for AutoUnattend.xml...", LogLevel.INFO, "WIN-OOBE")
+                            val unattendXml = WindowsUnattendGenerator.generateAutoUnattendXml(config.windowsUserExperience)
+                            val xmlBytes = unattendXml.toByteArray(Charsets.UTF_8)
+                            val injected = Fat32Formatter.createRootDirectoryFile(
                                 initialRootDirSector = rootDirSector,
                                 initialFatSector = fatTableSector,
                                 initialFsInfoSector = fsInfoSector,
                                 rootDirLba = rootDirLba,
                                 sectorsPerCluster = fatStructures.sectorsPerCluster,
-                                files = fdFiles,
-                                startCluster = startCluster
+                                fileName83 = "AUTOUNATXML",
+                                fileContent = xmlBytes,
+                                startCluster = 3
                             )
+                            rootDirSector = injected.updatedRootDirSector
+                            fatTableSector = injected.updatedFatSector
+                            fsInfoSector = injected.updatedFsInfoSector
+                            clustersInjected = injected.clustersAllocated
 
-                            rootDirSector = fdInjected.updatedRootDirSector
-                            fatTableSector = fdInjected.updatedFatSector
-                            fsInfoSector = fdInjected.updatedFsInfoSector
+                            val cluster3Lba = rootDirLba + fatStructures.sectorsPerCluster
+                            writeSectorsWithRetry(driver, cluster3Lba, xmlBytes, emitProgress)
+                            logRepository.log("AutoUnattend.xml (${xmlBytes.size} bytes) written across $clustersInjected cluster(s) starting at LBA $cluster3Lba.", LogLevel.SUCCESS, "WIN-OOBE")
+                        }
 
-                            var currentFileCluster = startCluster
-                            val clusterBytes = (fatStructures.sectorsPerCluster * driver.sectorSize).coerceAtLeast(512)
-                            var totalFdBytes = 0L
-                            verifyStartLba = rootDirLba + (fatStructures.sectorsPerCluster.toLong() * (startCluster - 2))
+                        // Install Bootloader payload files into FAT32 filesystem
+                        when (config.bootSelectionType) {
+                            BootSelectionType.UEFI_SHELL -> {
+                                logRepository.log("Fetching official EDK2 UEFI Shell (x64) release binary...", LogLevel.INFO, "BOOTLOADER")
+                                val shellResult = bootloaderManager.getUefiShellBinary(
+                                    isCancelled = { isCancelled.get() },
+                                    onProgress = { pct, msg -> emitProgress(WriteProgress.Analyzing(message = msg)) }
+                                )
 
-                            for (file in fdFiles) {
-                                val fileLba = rootDirLba + (fatStructures.sectorsPerCluster.toLong() * (currentFileCluster - 2))
-                                writeSectorsWithRetry(driver, fileLba, file.content, emitProgress)
-                                sourceSha256Digest.update(file.content)
-                                totalFdBytes += file.content.size
-                                val clustersUsed = ((file.content.size + clusterBytes - 1) / clusterBytes).coerceAtLeast(1)
-                                currentFileCluster += clustersUsed
+                                if (shellResult.isFailure) {
+                                    val err = shellResult.exceptionOrNull()?.message ?: "UEFI Shell download failed"
+                                    logRepository.log("ERROR: $err", LogLevel.ERROR, "BOOTLOADER")
+                                    emitProgress(WriteProgress.Error(message = err))
+                                    return
+                                }
+
+                                val shellBytes = shellResult.getOrThrow()
+                                logRepository.log("Building UEFI ESP directory tree (\\EFI\\BOOT\\BOOTX64.EFI)...", LogLevel.INFO, "BOOTLOADER")
+                                val efiTree = Fat32Formatter.createEfiBootTree(
+                                    initialRootDirSector = rootDirSector,
+                                    initialFatSectors = listOf(fatTableSector),
+                                    initialFsInfoSector = fsInfoSector,
+                                    sectorsPerCluster = fatStructures.sectorsPerCluster,
+                                    efiBinaryPayload = shellBytes,
+                                    startCluster = 3 + clustersInjected
+                                )
+
+                                rootDirSector = efiTree.updatedRootDirSector
+                                fatTableSector = efiTree.updatedFatSector
+                                fsInfoSector = efiTree.updatedFsInfoSector
+
+                                val efiDirLba = rootDirLba + (fatStructures.sectorsPerCluster.toLong() * (efiTree.efiDirCluster - 2))
+                                val bootDirLba = rootDirLba + (fatStructures.sectorsPerCluster.toLong() * (efiTree.bootDirCluster - 2))
+                                val payloadLba = rootDirLba + (fatStructures.sectorsPerCluster.toLong() * (efiTree.payloadStartCluster - 2))
+
+                                writeSectorsWithRetry(driver, efiDirLba, efiTree.efiDirClusterSector, emitProgress)
+                                writeSectorsWithRetry(driver, bootDirLba, efiTree.bootDirClusterSector, emitProgress)
+                                writeSectorsWithRetry(driver, payloadLba, shellBytes, emitProgress)
+
+                                sourceSha256Digest.update(shellBytes)
+                                bytesWritten = shellBytes.size.toLong()
+                                verifyStartLba = payloadLba
+
+                                logRepository.log("EDK2 UEFI Shell binary (${shellBytes.size} bytes) installed at \\EFI\\BOOT\\BOOTX64.EFI (Cluster ${efiTree.payloadStartCluster}, LBA $payloadLba).", LogLevel.SUCCESS, "BOOTLOADER")
                             }
+                            BootSelectionType.MSDOS -> {
+                                logRepository.log("MS-DOS mode: Note that proprietary MS-DOS binaries cannot be bundled due to Microsoft licensing restrictions. Writing placeholder boot record.", LogLevel.INFO, "BOOTLOADER")
+                                val msDosStub = ByteArray(64 * 1024)
+                                "MS-DOS IO.SYS MSDOS.SYS COMMAND.COM PLACEHOLDER".toByteArray(Charsets.US_ASCII).copyInto(msDosStub, 0)
+                                val msDosLba = rootDirLba + (fatStructures.sectorsPerCluster.toLong() * (3 + clustersInjected - 2))
+                                writeSectorsWithRetry(driver, msDosLba, msDosStub, emitProgress)
+                                sourceSha256Digest.update(msDosStub)
+                                bytesWritten = msDosStub.size.toLong()
+                                verifyStartLba = msDosLba
+                            }
+                            else -> {
+                                val defaultStub = ByteArray(32 * 1024)
+                                "RUFUS NON-BOOTABLE DATA PARTITION".toByteArray(Charsets.US_ASCII).copyInto(defaultStub, 0)
+                                val defaultLba = rootDirLba + (fatStructures.sectorsPerCluster.toLong() * (3 + clustersInjected - 2))
+                                writeSectorsWithRetry(driver, defaultLba, defaultStub, emitProgress)
+                                sourceSha256Digest.update(defaultStub)
+                                bytesWritten = defaultStub.size.toLong()
+                                verifyStartLba = defaultLba
+                            }
+                        }
 
-                            bytesWritten = totalFdBytes
-                            logRepository.log("FreeDOS KERNEL.SYS and COMMAND.COM injected into root directory. Note: BIOS booting requires sys boot record.", LogLevel.SUCCESS, "BOOTLOADER")
-                        }
-                        BootSelectionType.MSDOS -> {
-                            logRepository.log("MS-DOS mode: Note that proprietary MS-DOS binaries cannot be bundled due to Microsoft licensing restrictions. Writing placeholder boot record.", LogLevel.INFO, "BOOTLOADER")
-                            val msDosStub = ByteArray(64 * 1024)
-                            "MS-DOS IO.SYS MSDOS.SYS COMMAND.COM PLACEHOLDER".toByteArray(Charsets.US_ASCII).copyInto(msDosStub, 0)
-                            val msDosLba = rootDirLba + (fatStructures.sectorsPerCluster.toLong() * (3 + clustersInjected - 2))
-                            writeSectorsWithRetry(driver, msDosLba, msDosStub, emitProgress)
-                            sourceSha256Digest.update(msDosStub)
-                            bytesWritten = msDosStub.size.toLong()
-                            verifyStartLba = msDosLba
-                        }
-                        else -> {
-                            val defaultStub = ByteArray(32 * 1024)
-                            "RUFUS NON-BOOTABLE DATA PARTITION".toByteArray(Charsets.US_ASCII).copyInto(defaultStub, 0)
-                            val defaultLba = rootDirLba + (fatStructures.sectorsPerCluster.toLong() * (3 + clustersInjected - 2))
-                            writeSectorsWithRetry(driver, defaultLba, defaultStub, emitProgress)
-                            sourceSha256Digest.update(defaultStub)
-                            bytesWritten = defaultStub.size.toLong()
-                            verifyStartLba = defaultLba
-                        }
+                        // Write FAT32 filesystem structures to flash
+                        writeSectorsWithRetry(driver, startPartitionLba, fatStructures.vbr, emitProgress)
+                        writeSectorsWithRetry(driver, startPartitionLba + 1, fsInfoSector, emitProgress)
+                        writeSectorsWithRetry(driver, startPartitionLba + 6, fatStructures.backupVbr, emitProgress)
+                        writeSectorsWithRetry(driver, startPartitionLba + 7, fsInfoSector, emitProgress)
+                        writeSectorsWithRetry(driver, startPartitionLba + fatStructures.reservedSectors, fatTableSector, emitProgress)
+                        writeSectorsWithRetry(driver, startPartitionLba + fatStructures.reservedSectors + fatStructures.sectorsPerFat, fatTableSector, emitProgress)
+                        writeSectorsWithRetry(driver, rootDirLba, rootDirSector, emitProgress)
+
+                        startDataLba = rootDirLba + (fatStructures.sectorsPerCluster.toLong() * (1 + clustersInjected))
+                        logRepository.log("FAT32 filesystem initialized (VBR, FSInfo, Backups, FAT tables, and Root Directory created).", LogLevel.SUCCESS, "FORMAT")
                     }
 
-                    // Write FAT32 filesystem structures to flash
-                    writeSectorsWithRetry(driver, startPartitionLba, fatStructures.vbr, emitProgress)
-                    writeSectorsWithRetry(driver, startPartitionLba + 1, fsInfoSector, emitProgress)
-                    writeSectorsWithRetry(driver, startPartitionLba + 6, fatStructures.backupVbr, emitProgress)
-                    writeSectorsWithRetry(driver, startPartitionLba + 7, fsInfoSector, emitProgress)
-                    writeSectorsWithRetry(driver, startPartitionLba + fatStructures.reservedSectors, fatTableSector, emitProgress)
-                    writeSectorsWithRetry(driver, startPartitionLba + fatStructures.reservedSectors + fatStructures.sectorsPerFat, fatTableSector, emitProgress)
-                    writeSectorsWithRetry(driver, rootDirLba, rootDirSector, emitProgress)
-
-                    startDataLba = rootDirLba + (fatStructures.sectorsPerCluster.toLong() * (1 + clustersInjected))
-                    logRepository.log("FAT32 filesystem initialized (VBR, FSInfo, Backups, FAT tables, and Root Directory created).", LogLevel.SUCCESS, "FORMAT")
-                }
-
-                emitProgress(WriteProgress.Formatting(percentage = 100, message = "Formatting complete."))
-
-                // If exFAT and payload needed:
-                if (config.fileSystem == FileSystem.EXFAT) {
-                    when (config.bootSelectionType) {
-                        BootSelectionType.UEFI_SHELL -> {
-                            logRepository.log("Fetching official EDK2 UEFI Shell (x64) release binary for exFAT...", LogLevel.INFO, "BOOTLOADER")
-                            val shellResult = bootloaderManager.getUefiShellBinary(
-                                isCancelled = { isCancelled.get() },
-                                onProgress = { pct, msg -> emitProgress(WriteProgress.Analyzing(message = msg)) }
-                            )
-                            if (shellResult.isFailure) {
-                                val err = shellResult.exceptionOrNull()?.message ?: "UEFI Shell download failed"
-                                logRepository.log("ERROR: $err", LogLevel.ERROR, "BOOTLOADER")
-                                emitProgress(WriteProgress.Error(message = err))
-                                return
-                            }
-                            val shellBytes = shellResult.getOrThrow()
-                            writeSectorsWithRetry(driver, startDataLba, shellBytes, emitProgress)
-                            sourceSha256Digest.update(shellBytes)
-                            bytesWritten = shellBytes.size.toLong()
-                            verifyStartLba = startDataLba
-                            logRepository.log("EDK2 UEFI Shell written to exFAT partition at LBA $startDataLba.", LogLevel.SUCCESS, "BOOTLOADER")
-                        }
-                        BootSelectionType.FREEDOS -> {
-                            logRepository.log("Fetching official FreeDOS 1.3 system distribution floppy image...", LogLevel.INFO, "BOOTLOADER")
-                            val fdResult = bootloaderManager.getFreeDosPayloadFiles(
-                                isCancelled = { isCancelled.get() },
-                                onProgress = { pct, msg -> emitProgress(WriteProgress.Analyzing(message = msg)) }
-                            )
-                            if (fdResult.isFailure) {
-                                val err = fdResult.exceptionOrNull()?.message ?: "FreeDOS payload extraction failed"
-                                logRepository.log("ERROR: $err", LogLevel.ERROR, "BOOTLOADER")
-                                emitProgress(WriteProgress.Error(message = err))
-                                return
-                            }
-                            val fdFiles = fdResult.getOrThrow()
-                            var offset = 0L
-                            for (file in fdFiles) {
-                                writeSectorsWithRetry(driver, startDataLba + (offset / driver.sectorSize), file.content, emitProgress)
-                                sourceSha256Digest.update(file.content)
-                                offset += file.content.size
-                            }
-                            bytesWritten = offset
-                            verifyStartLba = startDataLba
-                            logRepository.log("FreeDOS system files written to exFAT partition at LBA $startDataLba.", LogLevel.SUCCESS, "BOOTLOADER")
-                        }
-                        BootSelectionType.MSDOS -> {
-                            val msDosStub = ByteArray(64 * 1024)
-                            "MS-DOS IO.SYS MSDOS.SYS COMMAND.COM PLACEHOLDER".toByteArray(Charsets.US_ASCII).copyInto(msDosStub, 0)
-                            writeSectorsWithRetry(driver, startDataLba, msDosStub, emitProgress)
-                            sourceSha256Digest.update(msDosStub)
-                            bytesWritten = msDosStub.size.toLong()
-                            verifyStartLba = startDataLba
-                        }
-                        else -> {
-                            val defaultStub = ByteArray(32 * 1024)
-                            "RUFUS NON-BOOTABLE DATA PARTITION".toByteArray(Charsets.US_ASCII).copyInto(defaultStub, 0)
-                            writeSectorsWithRetry(driver, startDataLba, defaultStub, emitProgress)
-                            sourceSha256Digest.update(defaultStub)
-                            bytesWritten = defaultStub.size.toLong()
-                            verifyStartLba = startDataLba
-                        }
-                    }
+                    emitProgress(WriteProgress.Formatting(percentage = 100, message = "Formatting complete."))
                 }
 
                 emitProgress(

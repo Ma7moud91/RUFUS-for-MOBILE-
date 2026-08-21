@@ -3,14 +3,6 @@ package com.example.usb.filesystem
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-data class Fat12FileEntry(
-    val fileName: String,
-    val sfn: String,
-    val startCluster: Int,
-    val fileSize: Int,
-    val content: ByteArray
-)
-
 object Fat12FloppyParser {
 
     /**
@@ -50,12 +42,13 @@ object Fat12FloppyParser {
             if (firstByte == 0xE5) continue // Deleted entry
 
             val attr = imageBytes[entryOffset + 11].toInt() and 0xFF
+            // Explicitly skip Long File Name (LFN) directory entries
+            if ((attr and 0x3F) == 0x0F) continue
             if ((attr and 0x08) != 0) continue // Volume label entry
             if ((attr and 0x10) != 0) continue // Subdirectory entry
 
             val namePart = String(imageBytes, entryOffset, 8, Charsets.US_ASCII).trim()
             val extPart = String(imageBytes, entryOffset + 8, 3, Charsets.US_ASCII).trim()
-            val sfn = String(imageBytes, entryOffset, 11, Charsets.US_ASCII).trim()
             val fullFileName = if (extPart.isNotEmpty()) "$namePart.$extPart" else namePart
 
             val startCluster = (imageBytes[entryOffset + 26].toInt() and 0xFF) or

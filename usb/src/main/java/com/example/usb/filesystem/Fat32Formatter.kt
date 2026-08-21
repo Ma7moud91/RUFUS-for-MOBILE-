@@ -19,16 +19,20 @@ data class ExFatFormattedStructures(
     val mainBootRegion: ByteArray, // 12 sectors (6144 bytes)
     val backupBootRegion: ByteArray, // 12 sectors (6144 bytes)
     val initialFatSector: ByteArray, // 512 bytes
-    val allocationBitmapCluster: ByteArray,
+    val allocationBitmapClusters: ByteArray,
     val rootDirCluster: ByteArray,
     val fatOffsetSectors: Int,
     val fatLengthSectors: Int,
     val clusterHeapOffsetSectors: Int,
     val clusterCount: Int,
     val sectorsPerCluster: Int,
-    val rootDirClusterNumber: Int = 4,
-    val allocationBitmapClusterNumber: Int = 2
-)
+    val rootDirClusterNumber: Int,
+    val allocationBitmapClusterNumber: Int = 2,
+    val bitmapClustersNeeded: Int = 1
+) {
+    // Backwards compatibility getter
+    val allocationBitmapCluster: ByteArray get() = allocationBitmapClusters
+}
 
 data class InjectedFile(
     val fileName83: String,
@@ -37,23 +41,27 @@ data class InjectedFile(
 
 data class Fat32InjectedResult(
     val updatedRootDirSector: ByteArray,
-    val updatedFatSector: ByteArray,
+    val updatedFatSectors: List<ByteArray>,
     val updatedFsInfoSector: ByteArray,
     val clustersAllocated: Int,
     val nextFreeCluster: Int
-)
+) {
+    val updatedFatSector: ByteArray get() = updatedFatSectors.firstOrNull() ?: ByteArray(512)
+}
 
 data class EfiDirectoryStructures(
     val updatedRootDirSector: ByteArray,
     val efiDirClusterSector: ByteArray,
     val bootDirClusterSector: ByteArray,
-    val updatedFatSector: ByteArray,
+    val updatedFatSectors: List<ByteArray>,
     val updatedFsInfoSector: ByteArray,
     val efiDirCluster: Int,
     val bootDirCluster: Int,
     val payloadStartCluster: Int,
     val totalClustersAllocated: Int
-)
+) {
+    val updatedFatSector: ByteArray get() = updatedFatSectors.firstOrNull() ?: ByteArray(512)
+}
 
 object Fat32Formatter {
 
@@ -199,8 +207,13 @@ object Fat32Formatter {
         val clusterHeapOffset = (((fatOffset + fatLength + actualSectorsPerCluster - 1) / actualSectorsPerCluster) * actualSectorsPerCluster)
         val clusterCount = ((totalPartitionSectors - clusterHeapOffset) / actualSectorsPerCluster).coerceAtLeast(1L).toInt()
 
-        val rootDirClusterNumber = 4
+        // Sector-aligned bitmap size and computed cluster requirement
+        val rawBitmapBytes = (clusterCount + 7) / 8
+        val bitmapSizeBytes = (((rawBitmapBytes + 511) / 512) * 512).coerceAtLeast(512)
+        val bitmapClustersNeeded = ((bitmapSizeBytes + clusterBytes - 1) / clusterBytes).coerceAtLeast(1)
+
         val allocationBitmapClusterNumber = 2
+        val rootDirClusterNumber = allocationBitmapClusterNumber + bitmapClustersNeeded
 
         // Main Boot Region (12 sectors: 0..11)
         val mainBootRegion = ByteArray(12 * 512)
@@ -216,7 +229,7 @@ object Fat32Formatter {
         vbrBuf.putInt(fatLength) // FatLength (84..87)
         vbrBuf.putInt(clusterHeapOffset) // ClusterHeapOffset (88..91)
         vbrBuf.putInt(clusterCount) // ClusterCount (92..95)
-        vbrBuf.putInt(rootDirClusterNumber) // FirstClusterOfRootDirectory (96..99)
+        vbrBuf.putInt(rootDirClusterNumber) // FirstClusterOfRootDirectory (96..99) - Computed BEFORE checksum
         vbrBuf.putInt(0x12345678) // VolumeSerialNumber (100..103)
         vbrBuf.putShort(0x0100.toShort()) // FileSystemRevision 1.00 (104..105)
         vbrBuf.putShort(0x0000.toShort()) // VolumeFlags (106..107)
@@ -260,17 +273,42 @@ object Fat32Formatter {
         val fatBuf = ByteBuffer.wrap(initialFat).order(ByteOrder.LITTLE_ENDIAN)
         fatBuf.putInt(0xFFFFFFF8.toInt()) // Entry 0: Media type
         fatBuf.putInt(0xFFFFFFFF.toInt()) // Entry 1: End marker
-        fatBuf.putInt(0xFFFFFFFD.toInt()) // Entry 2: Media-fail marker / Bitmap
-        fatBuf.putInt(0xFFFFFFFF.toInt()) // Entry 3: Unused / marker
-        fatBuf.putInt(0xFFFFFFFF.toInt()) // Entry 4: Root dir EOF
 
-        // Allocation Bitmap (Cluster #2)
-        val bitmapSizeBytes = ((clusterCount + 7) / 8).coerceAtLeast(1)
-        val bitmapCluster = ByteArray(clusterBytes)
-        // Bit 0 = Cluster 2 (Bitmap allocated), Bit 2 = Cluster 4 (Root Dir allocated)
-        bitmapCluster[0] = 0x05.toByte() // 0b00000101
+        // Clusters 2 .. (1 + bitmapClustersNeeded): bitmap chain
+        for (i in 0 until bitmapClustersNeeded) {
+            val cluster = allocationBitmapClusterNumber + i
+            if (cluster * 4 + 4 <= initialFat.size) {
+                fatBuf.position(cluster * 4)
+                if (i == bitmapClustersNeeded - 1) {
+                    fatBuf.putInt(0xFFFFFFFF.toInt()) // EOC for bitmap
+                } else {
+                    fatBuf.putInt(cluster + 1) // Next cluster in bitmap chain
+                }
+            }
+        }
 
-        // Root Directory (Cluster #4)
+        // Entry rootDirClusterNumber: Root dir EOF marker
+        if (rootDirClusterNumber * 4 + 4 <= initialFat.size) {
+            fatBuf.position(rootDirClusterNumber * 4)
+            fatBuf.putInt(0xFFFFFFFF.toInt())
+        }
+
+        // Allocation Bitmap: Multi-cluster byte array
+        val allocationBitmap = ByteArray(bitmapClustersNeeded * clusterBytes)
+        // Mark bitmap clusters as allocated
+        for (c in allocationBitmapClusterNumber until (allocationBitmapClusterNumber + bitmapClustersNeeded)) {
+            val bitIndex = c - 2
+            val byteIndex = bitIndex / 8
+            val bitPos = bitIndex % 8
+            allocationBitmap[byteIndex] = (allocationBitmap[byteIndex].toInt() or (1 shl bitPos)).toByte()
+        }
+        // Mark root directory cluster as allocated
+        val rootBitIndex = rootDirClusterNumber - 2
+        val rootByteIndex = rootBitIndex / 8
+        val rootBitPos = rootBitIndex % 8
+        allocationBitmap[rootByteIndex] = (allocationBitmap[rootByteIndex].toInt() or (1 shl rootBitPos)).toByte()
+
+        // Root Directory (Cluster #rootDirClusterNumber)
         val rootDirCluster = ByteArray(clusterBytes)
         val rootBuf = ByteBuffer.wrap(rootDirCluster).order(ByteOrder.LITTLE_ENDIAN)
 
@@ -295,13 +333,13 @@ object Fat32Formatter {
         rootBuf.put(0x00.toByte()) // BitmapFlags = 0 (Active FAT allocation bitmap)
         rootBuf.put(ByteArray(18)) // Reserved 18 bytes (offset 2..19)
         rootBuf.putInt(allocationBitmapClusterNumber) // FirstCluster = 2 (offset 20..23)
-        rootBuf.putLong(bitmapSizeBytes.toLong()) // DataLength in bytes (offset 24..31)
+        rootBuf.putLong(bitmapSizeBytes.toLong()) // DataLength in bytes (offset 24..31) - sector aligned
 
         return ExFatFormattedStructures(
             mainBootRegion = mainBootRegion,
             backupBootRegion = backupBootRegion,
             initialFatSector = initialFat,
-            allocationBitmapCluster = bitmapCluster,
+            allocationBitmapClusters = allocationBitmap,
             rootDirCluster = rootDirCluster,
             fatOffsetSectors = fatOffset,
             fatLengthSectors = fatLength,
@@ -309,16 +347,17 @@ object Fat32Formatter {
             clusterCount = clusterCount,
             sectorsPerCluster = actualSectorsPerCluster,
             rootDirClusterNumber = rootDirClusterNumber,
-            allocationBitmapClusterNumber = allocationBitmapClusterNumber
+            allocationBitmapClusterNumber = allocationBitmapClusterNumber,
+            bitmapClustersNeeded = bitmapClustersNeeded
         )
     }
 
     /**
-     * Injects multiple files into FAT32 root directory and updates the FAT allocation table and FSInfo.
+     * Injects multiple files into FAT32 root directory and updates the multi-sector FAT allocation table and FSInfo.
      */
     fun createRootDirectoryFiles(
         initialRootDirSector: ByteArray,
-        initialFatSector: ByteArray,
+        initialFatSectors: List<ByteArray>,
         initialFsInfoSector: ByteArray,
         rootDirLba: Long,
         sectorsPerCluster: Int,
@@ -326,12 +365,18 @@ object Fat32Formatter {
         startCluster: Int = 3
     ): Fat32InjectedResult {
         val updatedRootDir = initialRootDirSector.copyOf()
-        val updatedFat = initialFatSector.copyOf()
+        val totalFatBytes = initialFatSectors.sumOf { it.size }
+        val combinedFat = ByteArray(totalFatBytes)
+        var fatOffset = 0
+        for (sec in initialFatSectors) {
+            System.arraycopy(sec, 0, combinedFat, fatOffset, sec.size)
+            fatOffset += sec.size
+        }
         val updatedFsInfo = initialFsInfoSector.copyOf()
 
         val clusterBytes = (sectorsPerCluster * 512).coerceAtLeast(512)
         val dirBuf = ByteBuffer.wrap(updatedRootDir).order(ByteOrder.LITTLE_ENDIAN)
-        val fatBuf = ByteBuffer.wrap(updatedFat).order(ByteOrder.LITTLE_ENDIAN)
+        val fatBuf = ByteBuffer.wrap(combinedFat).order(ByteOrder.LITTLE_ENDIAN)
 
         var currentCluster = startCluster
         var totalClustersAllocated = 0
@@ -376,9 +421,9 @@ object Fat32Formatter {
             // Update FAT chain for this file
             for (i in 0 until clustersNeeded) {
                 val c = currentCluster + i
-                val fatOffset = c * 4
-                if (fatOffset + 4 <= updatedFat.size) {
-                    fatBuf.position(fatOffset)
+                val entryFatOffset = c * 4
+                if (entryFatOffset + 4 <= combinedFat.size) {
+                    fatBuf.position(entryFatOffset)
                     if (i == clustersNeeded - 1) {
                         fatBuf.putInt(0x0FFFFFFF) // End of chain (EOC)
                     } else {
@@ -402,12 +447,44 @@ object Fat32Formatter {
             fsBuf.putInt(492, nextFree)
         }
 
+        val updatedFatSectors = mutableListOf<ByteArray>()
+        var splitOffset = 0
+        for (sec in initialFatSectors) {
+            val copy = ByteArray(sec.size)
+            System.arraycopy(combinedFat, splitOffset, copy, 0, sec.size)
+            updatedFatSectors.add(copy)
+            splitOffset += sec.size
+        }
+
         return Fat32InjectedResult(
             updatedRootDirSector = updatedRootDir,
-            updatedFatSector = updatedFat,
+            updatedFatSectors = updatedFatSectors,
             updatedFsInfoSector = updatedFsInfo,
             clustersAllocated = totalClustersAllocated,
             nextFreeCluster = nextFree
+        )
+    }
+
+    /**
+     * Backward-compatible single FAT sector overload for createRootDirectoryFiles.
+     */
+    fun createRootDirectoryFiles(
+        initialRootDirSector: ByteArray,
+        initialFatSector: ByteArray,
+        initialFsInfoSector: ByteArray,
+        rootDirLba: Long,
+        sectorsPerCluster: Int,
+        files: List<InjectedFile>,
+        startCluster: Int = 3
+    ): Fat32InjectedResult {
+        return createRootDirectoryFiles(
+            initialRootDirSector = initialRootDirSector,
+            initialFatSectors = listOf(initialFatSector),
+            initialFsInfoSector = initialFsInfoSector,
+            rootDirLba = rootDirLba,
+            sectorsPerCluster = sectorsPerCluster,
+            files = files,
+            startCluster = startCluster
         )
     }
 
@@ -426,7 +503,31 @@ object Fat32Formatter {
     ): Fat32InjectedResult {
         return createRootDirectoryFiles(
             initialRootDirSector = initialRootDirSector,
-            initialFatSector = initialFatSector,
+            initialFatSectors = listOf(initialFatSector),
+            initialFsInfoSector = initialFsInfoSector,
+            rootDirLba = rootDirLba,
+            sectorsPerCluster = sectorsPerCluster,
+            files = listOf(InjectedFile(fileName83 = fileName83, content = fileContent)),
+            startCluster = startCluster
+        )
+    }
+
+    /**
+     * Multi-sector FAT overload for createRootDirectoryFile.
+     */
+    fun createRootDirectoryFile(
+        initialRootDirSector: ByteArray,
+        initialFatSectors: List<ByteArray>,
+        initialFsInfoSector: ByteArray,
+        rootDirLba: Long,
+        sectorsPerCluster: Int,
+        fileName83: String = "AUTOUNATXML",
+        fileContent: ByteArray,
+        startCluster: Int = 3
+    ): Fat32InjectedResult {
+        return createRootDirectoryFiles(
+            initialRootDirSector = initialRootDirSector,
+            initialFatSectors = initialFatSectors,
             initialFsInfoSector = initialFsInfoSector,
             rootDirLba = rootDirLba,
             sectorsPerCluster = sectorsPerCluster,
@@ -437,18 +538,24 @@ object Fat32Formatter {
 
     /**
      * Builds a full UEFI ESP directory tree: \EFI\BOOT\BOOTX64.EFI
-     * Allocates cluster 3 for EFI/, cluster 4 for BOOT/, and cluster 5.. for BOOTX64.EFI payload.
+     * Accepts multi-sector initialFatSectors to remove the 128-cluster ceiling.
      */
     fun createEfiBootTree(
         initialRootDirSector: ByteArray,
-        initialFatSector: ByteArray,
+        initialFatSectors: List<ByteArray>,
         initialFsInfoSector: ByteArray,
         sectorsPerCluster: Int,
         efiBinaryPayload: ByteArray,
         startCluster: Int = 3
     ): EfiDirectoryStructures {
         val updatedRootDir = initialRootDirSector.copyOf()
-        val updatedFat = initialFatSector.copyOf()
+        val totalFatBytes = initialFatSectors.sumOf { it.size }
+        val combinedFat = ByteArray(totalFatBytes)
+        var fatOffset = 0
+        for (sec in initialFatSectors) {
+            System.arraycopy(sec, 0, combinedFat, fatOffset, sec.size)
+            fatOffset += sec.size
+        }
         val updatedFsInfo = initialFsInfoSector.copyOf()
 
         val clusterBytes = (sectorsPerCluster * 512).coerceAtLeast(512)
@@ -460,7 +567,7 @@ object Fat32Formatter {
         val totalClustersAllocated = 2 + payloadClusters
 
         val dirBuf = ByteBuffer.wrap(updatedRootDir).order(ByteOrder.LITTLE_ENDIAN)
-        val fatBuf = ByteBuffer.wrap(updatedFat).order(ByteOrder.LITTLE_ENDIAN)
+        val fatBuf = ByteBuffer.wrap(combinedFat).order(ByteOrder.LITTLE_ENDIAN)
 
         // 1. Root directory entry for EFI (Directory, cluster 3)
         var rootEntryIdx = 0
@@ -544,17 +651,17 @@ object Fat32Formatter {
         bootBuf.putInt(efiBinaryPayload.size)
 
         // 4. Update FAT Table
-        if (efiCluster * 4 + 4 <= updatedFat.size) {
+        if (efiCluster * 4 + 4 <= combinedFat.size) {
             fatBuf.position(efiCluster * 4)
             fatBuf.putInt(0x0FFFFFFF) // EOC for EFI dir
         }
-        if (bootCluster * 4 + 4 <= updatedFat.size) {
+        if (bootCluster * 4 + 4 <= combinedFat.size) {
             fatBuf.position(bootCluster * 4)
             fatBuf.putInt(0x0FFFFFFF) // EOC for BOOT dir
         }
         for (i in 0 until payloadClusters) {
             val c = payloadStartCluster + i
-            if (c * 4 + 4 <= updatedFat.size) {
+            if (c * 4 + 4 <= combinedFat.size) {
                 fatBuf.position(c * 4)
                 if (i == payloadClusters - 1) {
                     fatBuf.putInt(0x0FFFFFFF) // EOC
@@ -575,16 +682,46 @@ object Fat32Formatter {
             fsBuf.putInt(492, nextFree)
         }
 
+        val updatedFatSectors = mutableListOf<ByteArray>()
+        var splitOffset = 0
+        for (sec in initialFatSectors) {
+            val copy = ByteArray(sec.size)
+            System.arraycopy(combinedFat, splitOffset, copy, 0, sec.size)
+            updatedFatSectors.add(copy)
+            splitOffset += sec.size
+        }
+
         return EfiDirectoryStructures(
             updatedRootDirSector = updatedRootDir,
             efiDirClusterSector = efiDirSector,
             bootDirClusterSector = bootDirSector,
-            updatedFatSector = updatedFat,
+            updatedFatSectors = updatedFatSectors,
             updatedFsInfoSector = updatedFsInfo,
             efiDirCluster = efiCluster,
             bootDirCluster = bootCluster,
             payloadStartCluster = payloadStartCluster,
             totalClustersAllocated = totalClustersAllocated
+        )
+    }
+
+    /**
+     * Backward-compatible single FAT sector overload for createEfiBootTree.
+     */
+    fun createEfiBootTree(
+        initialRootDirSector: ByteArray,
+        initialFatSector: ByteArray,
+        initialFsInfoSector: ByteArray,
+        sectorsPerCluster: Int,
+        efiBinaryPayload: ByteArray,
+        startCluster: Int = 3
+    ): EfiDirectoryStructures {
+        return createEfiBootTree(
+            initialRootDirSector = initialRootDirSector,
+            initialFatSectors = listOf(initialFatSector),
+            initialFsInfoSector = initialFsInfoSector,
+            sectorsPerCluster = sectorsPerCluster,
+            efiBinaryPayload = efiBinaryPayload,
+            startCluster = startCluster
         )
     }
 
