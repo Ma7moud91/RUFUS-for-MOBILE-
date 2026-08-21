@@ -55,6 +55,7 @@ fun DashboardScreen(
 
     var showDeviceSheet by remember { mutableStateOf(false) }
     var showPresetSheet by remember { mutableStateOf(false) }
+    var showTopMenu by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -64,7 +65,7 @@ fun DashboardScreen(
                         Surface(
                             shape = RoundedCornerShape(12.dp),
                             shadowElevation = 4.dp,
-                            modifier = Modifier.size(42.dp)
+                            modifier = Modifier.size(40.dp)
                         ) {
                             androidx.compose.foundation.Image(
                                 painter = androidx.compose.ui.res.painterResource(id = com.example.R.drawable.rufus_premium_icon_1786884298007),
@@ -74,66 +75,158 @@ fun DashboardScreen(
                             )
                         }
                         Spacer(modifier = Modifier.width(10.dp))
-                        Text(
-                            text = "Rufus",
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontSize = 20.sp
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Surface(
-                            shape = RoundedCornerShape(6.dp),
-                            color = MaterialTheme.colorScheme.primaryContainer
-                        ) {
-                            Text(
-                                text = "v4.5",
-                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                            )
+                        Column {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = "Rufus",
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontSize = 18.sp
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = MaterialTheme.colorScheme.primaryContainer
+                                ) {
+                                    Text(
+                                        text = "v4.5",
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                                    )
+                                }
+                            }
+
+                            // Real-time USB OTG Connection Status Indicator
+                            val isConnected = availableDevices.isNotEmpty()
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = if (isConnected) Color(0xFF10B981).copy(alpha = 0.15f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.8f),
+                                modifier = Modifier
+                                    .clickable { viewModel.refreshUsbDevices() }
+                                    .testTag("usb_otg_status_indicator")
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(6.dp)
+                                            .clip(CircleShape)
+                                            .background(if (isConnected) Color(0xFF10B981) else Color(0xFFE11D48))
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Icon(
+                                        Icons.Default.Usb,
+                                        contentDescription = if (isConnected) "USB OTG Connected" else "No USB OTG Device",
+                                        tint = if (isConnected) Color(0xFF10B981) else Color(0xFFE11D48),
+                                        modifier = Modifier.size(11.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(3.dp))
+                                    Text(
+                                        text = if (isConnected) {
+                                            if (availableDevices.size == 1) "OTG: ${availableDevices.first().productName.take(13)}" else "${availableDevices.size} OTG Drives"
+                                        } else "No OTG Device",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = if (isConnected) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
                         }
                     }
                 },
                 actions = {
-                    // Dynamic Tips & Interactive Guide button
-                    IconButton(
-                        onClick = { viewModel.startDynamicTips() },
-                        modifier = Modifier.bounceClick().testTag("tips_guide_button")
-                    ) {
-                        Icon(Icons.Outlined.HelpOutline, contentDescription = "Feature Walkthrough Guide", tint = MaterialTheme.colorScheme.primary)
-                    }
-
-                    // Hash & Checksum Tool button
-                    IconButton(
-                        onClick = { viewModel.openChecksumDialog() },
-                        modifier = Modifier.bounceClick().testTag("open_checksum_button")
-                    ) {
-                        Icon(Icons.Default.Tag, contentDescription = "Checksum & Hash", tint = MaterialTheme.colorScheme.primary)
-                    }
-
-                    // Language Switcher (38 Languages)
-                    IconButton(
-                        onClick = { viewModel.openLanguageDialog() },
-                        modifier = Modifier.bounceClick().testTag("language_selector_button")
-                    ) {
-                        Icon(Icons.Default.Language, contentDescription = "Language (${uiState.currentLanguage.nativeName})")
-                    }
-
-                    // UEFI Runtime Validation Tool
-                    IconButton(
-                        onClick = { viewModel.runUefiMediaValidation() },
-                        modifier = Modifier.bounceClick().testTag("uefi_validation_button")
-                    ) {
-                        Icon(Icons.Default.VerifiedUser, contentDescription = "UEFI Media Validation", tint = MaterialTheme.colorScheme.primary)
-                    }
-
-                    // Refresh USB
+                    // Primary Quick Action: Refresh USB Storage
                     IconButton(
                         onClick = { viewModel.refreshUsbDevices() },
                         modifier = Modifier.bounceClick().testTag("refresh_usb_button")
                     ) {
                         Icon(Icons.Default.Refresh, contentDescription = "Refresh USB")
+                    }
+
+                    // Consolidated Tools & Utilities Dropdown Menu
+                    Box {
+                        IconButton(
+                            onClick = { showTopMenu = true },
+                            modifier = Modifier.bounceClick()
+                        ) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "More Options & Tools")
+                        }
+
+                        DropdownMenu(
+                            expanded = showTopMenu,
+                            onDismissRequest = { showTopMenu = false }
+                        ) {
+                            // Dynamic Tips & Interactive Guide
+                            DropdownMenuItem(
+                                text = {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Outlined.HelpOutline, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                                        Spacer(modifier = Modifier.width(12.dp))
+                                        Text("Interactive Guide", fontWeight = FontWeight.Medium)
+                                    }
+                                },
+                                onClick = {
+                                    showTopMenu = false
+                                    viewModel.startDynamicTips()
+                                },
+                                modifier = Modifier.bounceClick().testTag("tips_guide_button")
+                            )
+
+                            // Hash & Checksum Tool
+                            DropdownMenuItem(
+                                text = {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Default.Tag, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                                        Spacer(modifier = Modifier.width(12.dp))
+                                        Text("Checksum & Hash", fontWeight = FontWeight.Medium)
+                                    }
+                                },
+                                onClick = {
+                                    showTopMenu = false
+                                    viewModel.openChecksumDialog()
+                                },
+                                modifier = Modifier.bounceClick().testTag("open_checksum_button")
+                            )
+
+                            // Language Switcher (38 Languages)
+                            DropdownMenuItem(
+                                text = {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Default.Language, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                                        Spacer(modifier = Modifier.width(12.dp))
+                                        Column {
+                                            Text("Language", fontWeight = FontWeight.Medium)
+                                            Text(uiState.currentLanguage.nativeName, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        }
+                                    }
+                                },
+                                onClick = {
+                                    showTopMenu = false
+                                    viewModel.openLanguageDialog()
+                                },
+                                modifier = Modifier.bounceClick().testTag("language_selector_button")
+                            )
+
+                            // UEFI Runtime Validation Tool
+                            DropdownMenuItem(
+                                text = {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Default.VerifiedUser, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                                        Spacer(modifier = Modifier.width(12.dp))
+                                        Text("UEFI Media Validation", fontWeight = FontWeight.Medium)
+                                    }
+                                },
+                                onClick = {
+                                    showTopMenu = false
+                                    viewModel.runUefiMediaValidation()
+                                },
+                                modifier = Modifier.bounceClick().testTag("uefi_validation_button")
+                            )
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -1029,6 +1122,7 @@ fun FlashTabContent(
             canStart = uiState.selectedDevice != null && (uiState.bootSelectionType != BootSelectionType.ISO_IMAGE || uiState.selectedImage != null),
             onStartClick = onStartClick,
             onCancelClick = onCancelClick,
+            onSelectIsoClick = onSelectImageClick,
             strings = uiState.strings
         )
 
@@ -1042,6 +1136,7 @@ fun ActiveFlashingProgressSection(
     canStart: Boolean,
     onStartClick: () -> Unit,
     onCancelClick: () -> Unit,
+    onSelectIsoClick: () -> Unit,
     strings: AppTranslations
 ) {
     val isWriting = writeProgress !is WriteProgress.Idle &&
@@ -1063,6 +1158,7 @@ fun ActiveFlashingProgressSection(
             canStart = canStart,
             onStartClick = onStartClick,
             onCancelClick = onCancelClick,
+            onSelectIsoClick = onSelectIsoClick,
             startButtonText = strings.startButton,
             flashingButtonText = strings.flashingButton,
             startAgainButtonText = strings.startAgainButton
@@ -1269,6 +1365,7 @@ fun InteractiveBootSelectionCard(
     onTargetSystemChange: (TargetSystem) -> Unit
 ) {
     var bootTypeExpanded by remember { mutableStateOf(false) }
+    var showImageOptionsMenu by remember { mutableStateOf(false) }
 
     Card(
         shape = RoundedCornerShape(24.dp),
@@ -1292,34 +1389,110 @@ fun InteractiveBootSelectionCard(
                     letterSpacing = 1.sp
                 )
                 if (bootSelectionType == BootSelectionType.ISO_IMAGE) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(
-                            text = "HASH",
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        // Primary Action: Select Image
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
                             color = MaterialTheme.colorScheme.primary,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier
-                                .clickable { onOpenChecksumClick() }
-                                .testTag("hash_button")
-                        )
-                        Text(
-                            text = "PRESETS",
-                            color = MaterialTheme.colorScheme.primary,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier
-                                .clickable { onPresetsClick() }
-                                .testTag("presets_button")
-                        )
-                        Text(
-                            text = "SELECT",
-                            color = MaterialTheme.colorScheme.primary,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
                             modifier = Modifier
                                 .clickable { onSelectClick() }
                                 .testTag("select_image_button")
-                        )
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    Icons.Default.FolderOpen,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "SELECT",
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+
+                        // Secondary / Tertiary Tools Overflow Menu (Hash Checksum & Download Presets)
+                        Box {
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = MaterialTheme.colorScheme.surface,
+                                border = CardDefaults.outlinedCardBorder(),
+                                modifier = Modifier.clickable { showImageOptionsMenu = true }
+                            ) {
+                                Box(
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        Icons.Default.MoreHoriz,
+                                        contentDescription = "Image Options",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+
+                            DropdownMenu(
+                                expanded = showImageOptionsMenu,
+                                onDismissRequest = { showImageOptionsMenu = false }
+                            ) {
+                                DropdownMenuItem(
+                                    text = {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(
+                                                Icons.Default.Tag,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(10.dp))
+                                            Column {
+                                                Text("Checksum / Hash", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                                Text("Verify MD5, SHA-1, SHA-256", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                            }
+                                        }
+                                    },
+                                    onClick = {
+                                        showImageOptionsMenu = false
+                                        onOpenChecksumClick()
+                                    },
+                                    modifier = Modifier.testTag("hash_button")
+                                )
+
+                                DropdownMenuItem(
+                                    text = {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(
+                                                Icons.Default.Download,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(10.dp))
+                                            Column {
+                                                Text("ISO Presets Catalog", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                                Text("Ubuntu, Windows 11, Fedora...", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                            }
+                                        }
+                                    },
+                                    onClick = {
+                                        showImageOptionsMenu = false
+                                        onPresetsClick()
+                                    },
+                                    modifier = Modifier.testTag("presets_button")
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -1498,6 +1671,7 @@ fun InteractiveFormatOptionsCard(
 ) {
     var fsExpanded by remember { mutableStateOf(false) }
     var clusterExpanded by remember { mutableStateOf(false) }
+    var isAdvancedExpanded by remember { mutableStateOf(false) }
 
     Card(
         shape = RoundedCornerShape(24.dp),
@@ -1517,7 +1691,7 @@ fun InteractiveFormatOptionsCard(
                 modifier = Modifier.padding(bottom = 12.dp)
             )
 
-            // Volume Label Input
+            // Primary Format Controls: Volume Label Input
             OutlinedTextField(
                 value = volumeLabel,
                 onValueChange = onVolumeLabelChange,
@@ -1531,19 +1705,27 @@ fun InteractiveFormatOptionsCard(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // File System Dropdown (FAT, FAT32, NTFS, UDF, exFAT, ReFS, ext2, ext3, ext4)
+            // Primary Format Controls: File System Dropdown (FAT, FAT32, NTFS, UDF, exFAT, ReFS, ext2, ext3, ext4)
             Box(modifier = Modifier.fillMaxWidth()) {
-                Row(
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = CardDefaults.outlinedCardBorder(),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
                         .clickable { fsExpanded = true }
-                        .padding(vertical = 10.dp, horizontal = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("File system", fontSize = 14.sp)
-                    Text("${fileSystem.name} ▼", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text("File system", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(fileSystem.label, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                        }
+                        Text("▼", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                    }
                 }
 
                 DropdownMenu(
@@ -1552,7 +1734,13 @@ fun InteractiveFormatOptionsCard(
                 ) {
                     FileSystem.values().forEach { fs ->
                         DropdownMenuItem(
-                            text = { Text(fs.label) },
+                            text = {
+                                Text(
+                                    fs.label,
+                                    fontWeight = if (fs == fileSystem) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (fs == fileSystem) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                )
+                            },
                             onClick = {
                                 onFileSystemChange(fs)
                                 fsExpanded = false
@@ -1562,125 +1750,215 @@ fun InteractiveFormatOptionsCard(
                 }
             }
 
-            Divider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
+            Spacer(modifier = Modifier.height(12.dp))
 
-            // Cluster Size Dropdown
-            Box(modifier = Modifier.fillMaxWidth()) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .clickable { clusterExpanded = true }
-                        .padding(vertical = 10.dp, horizontal = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Cluster size", fontSize = 14.sp)
-                    Text("${clusterSize / 1024} kilobytes ▼", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                }
-
-                DropdownMenu(
-                    expanded = clusterExpanded,
-                    onDismissRequest = { clusterExpanded = false }
-                ) {
-                    listOf(4096, 8192, 16384, 32768, 65536).forEach { size ->
-                        DropdownMenuItem(
-                            text = { Text("${size} bytes (${size / 1024} KB)") },
-                            onClick = {
-                                onClusterSizeChange(size)
-                                clusterExpanded = false
+            // Progressive Disclosure: Advanced Format Options Accordion
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.6f),
+                border = CardDefaults.outlinedCardBorder().copy(
+                    brush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .clickable { isAdvancedExpanded = !isAdvancedExpanded }
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Default.Tune,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Advanced Format Options",
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (!isAdvancedExpanded) {
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
+                                ) {
+                                    Text(
+                                        text = "${clusterSize / 1024} KB • ${if (quickFormat) "Quick" else "Full"}",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(4.dp))
                             }
-                        )
-                    }
-                }
-            }
-
-            Divider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
-
-            // Quick Format Checkbox
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(10.dp))
-                    .clickable { onQuickFormatToggle(!quickFormat) }
-                    .padding(vertical = 8.dp, horizontal = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Checkbox(
-                    checked = quickFormat,
-                    onCheckedChange = { onQuickFormatToggle(it) },
-                    modifier = Modifier.size(24.dp)
-                )
-                Spacer(modifier = Modifier.width(10.dp))
-                Text("Quick format", fontSize = 14.sp)
-            }
-
-            // Verify written data Checkbox
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(10.dp))
-                    .clickable { onVerifyWrittenDataToggle(!verifyWrittenData) }
-                    .padding(vertical = 8.dp, horizontal = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Checkbox(
-                    checked = verifyWrittenData,
-                    onCheckedChange = { onVerifyWrittenDataToggle(it) },
-                    modifier = Modifier.size(24.dp)
-                )
-                Spacer(modifier = Modifier.width(10.dp))
-                Column {
-                    Text("Verify written data", fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                    Text("Run bit-for-bit SHA-256 integrity verification after burn", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-
-            // Check bad blocks
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(10.dp))
-                    .clickable { onBadBlocksToggle(!checkBadBlocks) }
-                    .padding(vertical = 8.dp, horizontal = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Checkbox(
-                    checked = checkBadBlocks,
-                    onCheckedChange = { onBadBlocksToggle(it) },
-                    modifier = Modifier.size(24.dp)
-                )
-                Spacer(modifier = Modifier.width(10.dp))
-                Text("Check device for bad blocks (${badBlockPasses} pass)", fontSize = 14.sp)
-            }
-
-            // Bad block passes & Fake flash drive detection if bad blocks is on
-            if (checkBadBlocks) {
-                Column(modifier = Modifier.padding(start = 32.dp, top = 4.dp, bottom = 4.dp)) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        listOf(1, 2, 3, 4).forEach { pass ->
-                            FilterChip(
-                                selected = badBlockPasses == pass,
-                                onClick = { onBadBlockPassesChange(pass) },
-                                label = { Text("$pass pass${if (pass > 1) "es" else ""}", fontSize = 11.sp) },
-                                shape = RoundedCornerShape(8.dp)
+                            Icon(
+                                if (isAdvancedExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                contentDescription = if (isAdvancedExpanded) "Collapse" else "Expand",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
                             )
                         }
                     }
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onFakeDriveToggle(!detectFakeFlashDrives) },
-                        verticalAlignment = Alignment.CenterVertically
+
+                    AnimatedVisibility(
+                        visible = isAdvancedExpanded,
+                        enter = fadeIn() + expandVertically(),
+                        exit = fadeOut() + shrinkVertically()
                     ) {
-                        Checkbox(
-                            checked = detectFakeFlashDrives,
-                            onCheckedChange = onFakeDriveToggle,
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Detect 'fake' flash drives (True capacity test)", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                        Column(modifier = Modifier.padding(top = 12.dp)) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            // Cluster Size Dropdown
+                            Box(modifier = Modifier.fillMaxWidth()) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .clickable { clusterExpanded = true }
+                                        .padding(vertical = 8.dp, horizontal = 4.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column {
+                                        Text("Cluster size", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                        Text("Allocation unit size", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                    Text("${clusterSize / 1024} KB (Default) ▼", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                                }
+
+                                DropdownMenu(
+                                    expanded = clusterExpanded,
+                                    onDismissRequest = { clusterExpanded = false }
+                                ) {
+                                    listOf(4096, 8192, 16384, 32768, 65536).forEach { size ->
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                    "${size} bytes (${size / 1024} KB)",
+                                                    fontWeight = if (clusterSize == size) FontWeight.Bold else FontWeight.Normal,
+                                                    color = if (clusterSize == size) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                                )
+                                            },
+                                            onClick = {
+                                                onClusterSizeChange(size)
+                                                clusterExpanded = false
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f), modifier = Modifier.padding(vertical = 4.dp))
+
+                            // Quick Format Checkbox
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable { onQuickFormatToggle(!quickFormat) }
+                                    .padding(vertical = 6.dp, horizontal = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(
+                                    checked = quickFormat,
+                                    onCheckedChange = { onQuickFormatToggle(it) },
+                                    modifier = Modifier.size(24.dp)
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column {
+                                    Text("Quick format", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                    Text("Skip zero-filling the entire partition table", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f), modifier = Modifier.padding(vertical = 4.dp))
+
+                            // Verify written data Checkbox
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable { onVerifyWrittenDataToggle(!verifyWrittenData) }
+                                    .padding(vertical = 6.dp, horizontal = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(
+                                    checked = verifyWrittenData,
+                                    onCheckedChange = { onVerifyWrittenDataToggle(it) },
+                                    modifier = Modifier.size(24.dp)
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column {
+                                    Text("Verify written data", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                    Text("Run bit-for-bit SHA-256 integrity verification after burn", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f), modifier = Modifier.padding(vertical = 4.dp))
+
+                            // Check bad blocks
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable { onBadBlocksToggle(!checkBadBlocks) }
+                                    .padding(vertical = 6.dp, horizontal = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(
+                                    checked = checkBadBlocks,
+                                    onCheckedChange = { onBadBlocksToggle(it) },
+                                    modifier = Modifier.size(24.dp)
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column {
+                                    Text("Check device for bad blocks", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                    Text("Surface pattern test (${badBlockPasses} pass${if (badBlockPasses > 1) "es" else ""})", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+
+                            // Bad block passes & Fake flash drive detection if bad blocks is on
+                            if (checkBadBlocks) {
+                                Column(modifier = Modifier.padding(start = 34.dp, top = 4.dp, bottom = 4.dp)) {
+                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        listOf(1, 2, 3, 4).forEach { pass ->
+                                            FilterChip(
+                                                selected = badBlockPasses == pass,
+                                                onClick = { onBadBlockPassesChange(pass) },
+                                                label = { Text("$pass pass${if (pass > 1) "es" else ""}", fontSize = 11.sp) },
+                                                shape = RoundedCornerShape(8.dp)
+                                            )
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable { onFakeDriveToggle(!detectFakeFlashDrives) },
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Checkbox(
+                                            checked = detectFakeFlashDrives,
+                                            onCheckedChange = onFakeDriveToggle,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text("Detect 'fake' flash drives (True capacity test)", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1954,19 +2232,60 @@ fun ActionButtonsRow(
     canStart: Boolean,
     onStartClick: () -> Unit,
     onCancelClick: () -> Unit,
+    onSelectIsoClick: () -> Unit = {},
     startButtonText: String = "START",
     flashingButtonText: String = "FLASHING...",
     startAgainButtonText: String = "START AGAIN"
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
+        // Dedicated ISO File Picker Button in the Main Action Area
+        OutlinedButton(
+            onClick = onSelectIsoClick,
+            enabled = !isWriting,
+            modifier = Modifier
+                .weight(1f)
+                .height(56.dp)
+                .testTag("pick_iso_button"),
+            colors = ButtonDefaults.outlinedButtonColors(
+                containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f)
+            ),
+            shape = RoundedCornerShape(16.dp),
+            border = androidx.compose.foundation.BorderStroke(
+                width = 1.5.dp,
+                color = if (!isWriting) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
+            )
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    Icons.Default.FolderOpen,
+                    contentDescription = "Pick .ISO Disk Image",
+                    tint = if (!isWriting) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "SELECT .ISO",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (!isWriting) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                    letterSpacing = 0.5.sp
+                )
+            }
+        }
+
+        // Primary START / Flash Button
         Button(
             onClick = onStartClick,
             enabled = !isWriting && canStart,
             modifier = Modifier
-                .weight(1f)
+                .weight(1.2f)
                 .height(56.dp)
                 .testTag("start_button"),
             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
@@ -1974,22 +2293,25 @@ fun ActionButtonsRow(
         ) {
             Text(
                 text = if (isWriting) flashingButtonText else if (isCompleted) startAgainButtonText else startButtonText,
-                fontSize = 16.sp,
+                fontSize = 15.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 1.sp
             )
         }
 
-        OutlinedButton(
-            onClick = onCancelClick,
-            enabled = isWriting,
-            modifier = Modifier
-                .size(56.dp)
-                .testTag("cancel_button"),
-            shape = CircleShape,
-            contentPadding = PaddingValues(0.dp)
-        ) {
-            Text("✕", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        // Cancel Button during active flashing
+        if (isWriting) {
+            OutlinedButton(
+                onClick = onCancelClick,
+                enabled = isWriting,
+                modifier = Modifier
+                    .size(56.dp)
+                    .testTag("cancel_button"),
+                shape = CircleShape,
+                contentPadding = PaddingValues(0.dp)
+            ) {
+                Text("✕", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            }
         }
     }
 }

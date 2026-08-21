@@ -94,18 +94,22 @@ class MainActivity : ComponentActivity() {
                     DashboardScreen(
                         viewModel = dashboardViewModel,
                         onSelectImageClick = {
-                        try {
-                            pickImageLauncher.launch(arrayOf(
-                                "application/x-iso9660-image",
-                                "application/octet-stream",
-                                "application/zip",
-                                "application/x-raw-disk-image",
-                                "*/*"
-                            ))
-                        } catch (e: Exception) {
-                            Toast.makeText(this, "Could not open file picker: ${e.message}", Toast.LENGTH_LONG).show()
+                            try {
+                                pickImageLauncher.launch(arrayOf(
+                                    "application/x-iso9660-image",
+                                    "application/x-cd-image",
+                                    "application/octet-stream",
+                                    "application/x-raw-disk-image",
+                                    "application/zip",
+                                    "application/x-bzip2",
+                                    "application/x-gzip",
+                                    "application/x-xz",
+                                    "*/*"
+                                ))
+                            } catch (e: Exception) {
+                                Toast.makeText(this, "Could not open file picker: ${e.message}", Toast.LENGTH_LONG).show()
+                            }
                         }
-                    }
                 )
             }
             }
