@@ -236,25 +236,21 @@ object Fat32Formatter {
 
         // Sector 9: OEM Parameter Sector (zero-filled)
 
-        // Sector 10: Checksum Sector (exFAT spec 3.3.6)
-        var bootChecksum = 0
-        for (sec in 0..9) {
-            val secBase = sec * 512
-            for (i in 0 until 512) {
-                if ((sec == 0 || sec == 8) && (i == 510 || i == 511)) {
-                    continue
-                }
-                val byteVal = mainBootRegion[secBase + i].toInt() and 0xFF
-                bootChecksum = ((bootChecksum ushr 1) or (bootChecksum shl 31)) + byteVal
-            }
+        // Sector 10: Reserved Sector (zero-filled)
+
+        // Sector 11: Boot Checksum Sector (exFAT spec 3.3.6)
+        var checksum = 0 // Int used as UInt32; Kotlin arithmetic wraps naturally
+        val numberOfBytes = 512 * 11 // covers sectors 0..10 inclusive
+        for (index in 0 until numberOfBytes) {
+            if (index == 106 || index == 107 || index == 112) continue // VolumeFlags + PercentInUse only
+            val carry = if ((checksum and 1) != 0) 0x80000000.toInt() else 0
+            checksum = carry + ((checksum ushr 1) and 0x7FFFFFFF) + (mainBootRegion[index].toInt() and 0xFF)
         }
 
-        val checksumSecBuf = ByteBuffer.wrap(mainBootRegion, 10 * 512, 512).order(ByteOrder.LITTLE_ENDIAN)
+        val checksumSecBuf = ByteBuffer.wrap(mainBootRegion, 11 * 512, 512).order(ByteOrder.LITTLE_ENDIAN)
         for (w in 0 until 128) {
-            checksumSecBuf.putInt(bootChecksum)
+            checksumSecBuf.putInt(checksum)
         }
-
-        // Sector 11: Reserved (zero-filled)
 
         // Backup Boot Region (sectors 12..23) is identical to Main Boot Region
         val backupBootRegion = mainBootRegion.copyOf()

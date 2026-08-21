@@ -46,18 +46,24 @@ class RufusPhase3UnitTest {
         assertEquals(0x55.toByte(), exFat.mainBootRegion[8 * 512 + 510])
         assertEquals(0xAA.toByte(), exFat.mainBootRegion[8 * 512 + 511])
 
-        // 4. Verify Checksum sector (Sector 10)
-        val checksumSec = exFat.mainBootRegion.copyOfRange(10 * 512, 11 * 512)
+        // 4. Verify Sector 9 (OEM parameter) and Sector 10 (Reserved) are zero-filled
+        for (b in 9 * 512 until 11 * 512) {
+            assertEquals(0.toByte(), exFat.mainBootRegion[b])
+        }
+
+        // 5. Verify Checksum sector (Sector 11)
+        val checksumSec = exFat.mainBootRegion.copyOfRange(11 * 512, 12 * 512)
         val checksumBuf = ByteBuffer.wrap(checksumSec).order(ByteOrder.LITTLE_ENDIAN)
         val firstWord = checksumBuf.getInt(0)
+        assertNotEquals(0, firstWord)
         for (i in 0 until 128) {
             assertEquals("Checksum word $i must match", firstWord, checksumBuf.getInt(i * 4))
         }
 
-        // 5. Verify Allocation Bitmap cluster
+        // 6. Verify Allocation Bitmap cluster
         assertEquals(0x05.toByte(), exFat.allocationBitmapCluster[0]) // Bits 0 and 2 set
 
-        // 6. Verify Root Directory cluster (Cluster 4)
+        // 7. Verify Root Directory cluster (Cluster 4)
         val rootDir = exFat.rootDirCluster
         assertEquals(0x83.toByte(), rootDir[0]) // Volume label entry
         assertEquals(7.toByte(), rootDir[1]) // Length of "MYEXFAT"
