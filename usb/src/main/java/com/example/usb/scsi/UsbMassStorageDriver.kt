@@ -162,17 +162,28 @@ class UsbMassStorageDriver(
      * and clears the HALT feature on both bulk endpoints.
      */
     fun resetBotPipe() {
+        recoverPipe()
+    }
+
+    /**
+     * Executes Bulk-Only Mass Storage Reset per BOT specification section 5.3.4:
+     * 1. Issue Bulk-Only Mass Storage Reset control transfer (bmRequestType 0x21, bRequest 0xFF)
+     * 2. Wait at least 5ms as required by the USB BOT specification
+     * 3. Clear HALT / STALL on both Bulk IN and Bulk OUT endpoints
+     */
+    private fun recoverPipe() {
         val conn = connection ?: return
         val iface = usbInterface ?: return
         try {
-            // Bulk-Only Mass Storage Reset (bmRequestType: 0x21, bRequest: 0xFF)
+            // Bulk-Only Mass Storage Reset (bmRequestType: 0x21, bRequest: 0xFF, wValue: 0, wIndex: interface ID)
             conn.controlTransfer(0x21, 0xFF, 0, iface.id, null, 0, 1500)
-            
-            // Clear Halt Feature on Bulk IN and Bulk OUT endpoints
+            try {
+                Thread.sleep(10) // Spec requires >= 5ms delay
+            } catch (ignored: InterruptedException) {}
             endpointIn?.let { clearEndpointHalt(it) }
             endpointOut?.let { clearEndpointHalt(it) }
         } catch (e: Exception) {
-            Log.w(TAG, "BOT pipe reset notice: ${e.message}")
+            Log.w(TAG, "BOT recoverPipe failed: ${e.message}")
         }
     }
 
@@ -370,13 +381,13 @@ class UsbMassStorageDriver(
                 val cbw = ScsiCbw(tag, sendBuffer.size, ScsiConstants.DIRECTION_OUT, 0, cdb)
 
                 if (!sendCbw(cbw)) {
-                    clearEndpointHalt(epOut)
+                    recoverPipe()
                     continue
                 }
 
                 val transferred = conn.bulkTransfer(epOut, sendBuffer, sendBuffer.size, TIMEOUT_MS)
                 if (transferred <= 0) {
-                    clearEndpointHalt(epOut)
+                    recoverPipe()
                     requestSense()
                     continue
                 }
@@ -386,6 +397,7 @@ class UsbMassStorageDriver(
                     success = true
                     break
                 } else {
+                    recoverPipe()
                     requestSense()
                 }
             }
@@ -443,7 +455,7 @@ class UsbMassStorageDriver(
                 val tag = tagGenerator.getAndIncrement()
                 val cbw = ScsiCbw(tag, bytesThisBatch, ScsiConstants.DIRECTION_IN, 0, cdb)
                 if (!sendCbw(cbw)) {
-                    clearEndpointHalt(epOut)
+                    recoverPipe()
                     continue
                 }
 
@@ -456,6 +468,7 @@ class UsbMassStorageDriver(
                     batchSuccess = true
                     break
                 } else {
+                    recoverPipe()
                     requestSense()
                 }
             }

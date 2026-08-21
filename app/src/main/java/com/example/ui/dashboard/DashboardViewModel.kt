@@ -186,7 +186,7 @@ class DashboardViewModel(
 
 
     fun reportInvalidFile(name: String, extension: String) {
-        val errorMsg = "The file '$name' is not a supported bootable disk image (extension: .${extension.ifEmpty { "unknown" }}).\n\nRufus can only write verified bootable image formats:\n• .ISO (Standard CD/DVD/OS Installation Media)\n• .IMG / .RAW (Raw Sector Disk Images)\n• .VHD / .VHDX (Virtual Hard Disk Images)\n• .BIN / .DMG / .WIM / .ESD (System Images)\n• .GZ / .XZ / .BZ2 / .ZST / .ZIP (Compressed Disk Images)"
+        val errorMsg = "The file '$name' is not a supported bootable disk image (extension: .${extension.ifEmpty { "unknown" }}).\n\nRufus can only write verified bootable image formats:\n• .ISO (Standard CD/DVD/OS Installation Media)\n• .IMG / .RAW (Raw Sector Disk Images)\n• .VHD / .VHDX (Virtual Hard Disk Images)\n• .BIN / .DMG / .WIM / .ESD (System Images)"
         _uiState.update {
             it.copy(
                 showInvalidFileDialog = true,
@@ -768,7 +768,7 @@ class DashboardViewModel(
 
     companion object {
         val ALLOWED_FLASH_EXTENSIONS = setOf(
-            "iso", "img", "raw", "vhd", "vhdx", "bin", "gz", "xz", "bz2", "zst", "zip", "dmg", "toast", "wim", "esd"
+            "iso", "img", "raw", "vhd", "vhdx", "bin", "dmg", "toast", "wim", "esd"
         )
 
         fun provideFactory(

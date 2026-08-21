@@ -100,11 +100,8 @@ class MainActivity : ComponentActivity() {
                                     "application/x-cd-image",
                                     "application/octet-stream",
                                     "application/x-raw-disk-image",
-                                    "application/zip",
-                                    "application/x-bzip2",
-                                    "application/x-gzip",
-                                    "application/x-xz",
-                                    "*/*"
+                                    "application/x-vhd",
+                                    "application/x-virtualbox-vhd"
                                 ))
                             } catch (e: Exception) {
                                 Toast.makeText(this, "Could not open file picker: ${e.message}", Toast.LENGTH_LONG).show()

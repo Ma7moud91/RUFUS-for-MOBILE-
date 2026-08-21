@@ -15,6 +15,14 @@ data class Fat32FormattedStructures(
     val sectorsPerCluster: Int
 )
 
+data class Fat32InjectedResult(
+    val updatedRootDirSector: ByteArray,
+    val updatedFatSector: ByteArray,
+    val updatedFsInfoSector: ByteArray,
+    val clustersAllocated: Int,
+    val nextFreeCluster: Int
+)
+
 object Fat32Formatter {
 
     /**
@@ -135,14 +143,6 @@ object Fat32Formatter {
             sectorsPerCluster = sectorsPerCluster
         )
     }
-
-data class Fat32InjectedResult(
-    val updatedRootDirSector: ByteArray,
-    val updatedFatSector: ByteArray,
-    val updatedFsInfoSector: ByteArray,
-    val clustersAllocated: Int,
-    val nextFreeCluster: Int
-)
 
     /**
      * Injects a real file (e.g. AUTOUNAT.XML) into FAT32 root directory and updates the FAT allocation table and FSInfo.
