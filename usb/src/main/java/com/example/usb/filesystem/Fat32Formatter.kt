@@ -137,6 +137,47 @@ object Fat32Formatter {
     }
 
     /**
+     * Injects a real file (e.g. AUTOUNAT.XML) into FAT32 root directory and updates the FAT allocation table.
+     */
+    fun createRootDirectoryFile(
+        initialRootDirSector: ByteArray,
+        initialFatSector: ByteArray,
+        rootDirLba: Long,
+        sectorsPerCluster: Int,
+        fileName83: String = "AUTOUNATXML",
+        fileContent: ByteArray,
+        startCluster: Int = 3
+    ): Pair<ByteArray, ByteArray> {
+        val updatedRootDir = initialRootDirSector.copyOf()
+        val updatedFat = initialFatSector.copyOf()
+
+        // Write 32-byte SFN directory record at offset 32 (Entry 1, following Volume Label at Entry 0)
+        val dirBuf = ByteBuffer.wrap(updatedRootDir).order(ByteOrder.LITTLE_ENDIAN)
+        dirBuf.position(32)
+
+        val sfnBytes = fileName83.take(11).padEnd(11, ' ').uppercase().toByteArray(Charsets.US_ASCII)
+        dirBuf.put(sfnBytes)
+        dirBuf.put(0x20.toByte()) // Attribute: Archive (0x20)
+        dirBuf.put(0.toByte()) // NT reserved
+        dirBuf.put(0.toByte()) // Creation time tenths
+        dirBuf.putShort(0.toShort()) // Creation time
+        dirBuf.putShort(0x5295.toShort()) // Creation date
+        dirBuf.putShort(0x5295.toShort()) // Last access date
+        dirBuf.putShort(((startCluster shr 16) and 0xFFFF).toShort()) // High cluster
+        dirBuf.putShort(0.toShort()) // Write time
+        dirBuf.putShort(0x5295.toShort()) // Write date
+        dirBuf.putShort((startCluster and 0xFFFF).toShort()) // Low cluster
+        dirBuf.putInt(fileContent.size) // File size
+
+        // Update FAT1/FAT2 sector to mark startCluster as EOF (0x0FFFFFFF)
+        val fatBuf = ByteBuffer.wrap(updatedFat).order(ByteOrder.LITTLE_ENDIAN)
+        fatBuf.position(startCluster * 4)
+        fatBuf.putInt(0x0FFFFFFF)
+
+        return Pair(updatedRootDir, updatedFat)
+    }
+
+    /**
      * Backward-compatible helper returning Pair(vbr, fsInfo).
      */
     fun createFat32BootSectors(

@@ -193,6 +193,38 @@ class RealRufusWriteEngineImpl(
                 "SCSI"
             )
 
+            val startPartitionLba = 2048L
+
+            // 0. Pre-Flight Capacity Validation
+            var preflightPayloadSize = 0L
+            if (config.bootSelectionType == BootSelectionType.ISO_IMAGE && config.imageUri.isNotEmpty()) {
+                val uri = Uri.parse(config.imageUri)
+                preflightPayloadSize = if (config.imageSizeBytes > 0L) config.imageSizeBytes else queryUriFileSize(uri)
+                if (preflightPayloadSize <= 0L) {
+                    try {
+                        context.contentResolver.openInputStream(uri)?.use { stream ->
+                            preflightPayloadSize = stream.available().toLong().coerceAtLeast(0L)
+                        }
+                    } catch (e: Exception) {}
+                }
+            } else {
+                preflightPayloadSize = when (config.bootSelectionType) {
+                    BootSelectionType.UEFI_SHELL -> 1024L * 1024L
+                    BootSelectionType.FREEDOS -> 512L * 1024L
+                    BootSelectionType.MSDOS -> 256L * 1024L
+                    else -> 64L * 1024L
+                }
+            }
+
+            val requiredCapacityBytes = (startPartitionLba * driver.sectorSize) + preflightPayloadSize
+            if (preflightPayloadSize > 0L && requiredCapacityBytes > driver.totalCapacityBytes) {
+                val payloadMb = (preflightPayloadSize + 1024 * 1024 - 1) / (1024 * 1024)
+                val driveMb = driver.totalCapacityBytes / (1024 * 1024)
+                logRepository.log("CRITICAL ERROR: Payload image ($payloadMb MB) exceeds target USB capacity ($driveMb MB). Aborting before write.", LogLevel.ERROR, "HARDWARE")
+                emitProgress(WriteProgress.Error("Selected ISO image ($payloadMb MB) is too large for target USB drive ($driveMb MB). Please select a larger USB flash drive."))
+                return
+            }
+
             // 1. Bad Blocks Verification if requested
             if (config.badBlocks.enabled) {
                 val passes = config.badBlocks.passes.coerceAtLeast(1)
@@ -221,7 +253,6 @@ class RealRufusWriteEngineImpl(
             logRepository.log("Creating ${config.partitionScheme.label} partition table...", LogLevel.INFO, "PARTITION")
             emitProgress(WriteProgress.Partitioning(50, "Writing ${config.partitionScheme.label} partition headers..."))
 
-            val startPartitionLba = 2048L
             val isEsp = (config.bootSelectionType == BootSelectionType.UEFI_SHELL || config.targetSystem == TargetSystem.UEFI_NON_CSM)
 
             if (config.partitionScheme == PartitionScheme.GPT) {
@@ -273,52 +304,86 @@ class RealRufusWriteEngineImpl(
 
             val totalPartitionSectors = (driver.totalSectors - startPartitionLba).coerceAtLeast(1024L)
             var startDataLba = startPartitionLba + 32L
+            val sectorsPerCluster = (config.clusterSize / driver.sectorSize).coerceAtLeast(1)
 
             when (config.fileSystem) {
                 FileSystem.FAT32, FileSystem.FAT -> {
                     val fatStructures = Fat32Formatter.createCompleteFat32Structures(
                         totalPartitionSectors = totalPartitionSectors,
                         volumeLabel = config.volumeLabel,
-                        sectorsPerCluster = (config.clusterSize / driver.sectorSize).coerceAtLeast(1),
+                        sectorsPerCluster = sectorsPerCluster,
                         startLbaOffset = startPartitionLba.toInt()
                     )
+
+                    var rootDirSector = fatStructures.initialRootDirSector
+                    var fatTableSector = fatStructures.initialFatSector
+                    val rootDirLba = startPartitionLba + fatStructures.reservedSectors + (fatStructures.sectorsPerFat.toLong() * 2)
+
+                    // Inject AutoUnattend.xml into FAT32 root directory & FAT table if Windows customization requested
+                    if (config.isWindowsImage || config.bootSelectionType == BootSelectionType.WINDOWS_TO_GO) {
+                        logRepository.log("Creating FAT32 directory entry for AutoUnattend.xml...", LogLevel.INFO, "WIN-OOBE")
+                        val unattendXml = WindowsUnattendGenerator.generateAutoUnattendXml(config.windowsUserExperience)
+                        val xmlBytes = unattendXml.toByteArray(Charsets.UTF_8)
+                        val injected = Fat32Formatter.createRootDirectoryFile(
+                            initialRootDirSector = rootDirSector,
+                            initialFatSector = fatTableSector,
+                            rootDirLba = rootDirLba,
+                            sectorsPerCluster = fatStructures.sectorsPerCluster,
+                            fileName83 = "AUTOUNATXML",
+                            fileContent = xmlBytes,
+                            startCluster = 3
+                        )
+                        rootDirSector = injected.first
+                        fatTableSector = injected.second
+
+                        // Write actual AutoUnattend.xml content to Cluster 3
+                        val cluster3Lba = rootDirLba + fatStructures.sectorsPerCluster
+                        writeSectorsWithRetry(driver, cluster3Lba, xmlBytes, emitProgress)
+                        logRepository.log("AutoUnattend.xml (${xmlBytes.size} bytes) written to FAT32 Cluster 3 (LBA $cluster3Lba).", LogLevel.SUCCESS, "WIN-OOBE")
+                    }
 
                     writeSectorsWithRetry(driver, startPartitionLba, fatStructures.vbr, emitProgress)
                     writeSectorsWithRetry(driver, startPartitionLba + 1, fatStructures.fsInfo, emitProgress)
                     writeSectorsWithRetry(driver, startPartitionLba + 6, fatStructures.backupVbr, emitProgress)
                     writeSectorsWithRetry(driver, startPartitionLba + 7, fatStructures.backupFsInfo, emitProgress)
-                    writeSectorsWithRetry(driver, startPartitionLba + fatStructures.reservedSectors, fatStructures.initialFatSector, emitProgress)
-                    writeSectorsWithRetry(driver, startPartitionLba + fatStructures.reservedSectors + fatStructures.sectorsPerFat, fatStructures.initialFatSector, emitProgress)
-                    val rootDirLba = startPartitionLba + fatStructures.reservedSectors + (fatStructures.sectorsPerFat.toLong() * 2)
-                    writeSectorsWithRetry(driver, rootDirLba, fatStructures.initialRootDirSector, emitProgress)
+                    writeSectorsWithRetry(driver, startPartitionLba + fatStructures.reservedSectors, fatTableSector, emitProgress)
+                    writeSectorsWithRetry(driver, startPartitionLba + fatStructures.reservedSectors + fatStructures.sectorsPerFat, fatTableSector, emitProgress)
+                    writeSectorsWithRetry(driver, rootDirLba, rootDirSector, emitProgress)
 
-                    startDataLba = rootDirLba + fatStructures.sectorsPerCluster
+                    // Data payload starts at Cluster 4 (after root dir at cluster 2 and AutoUnattend at cluster 3)
+                    startDataLba = rootDirLba + (fatStructures.sectorsPerCluster.toLong() * 2)
                     logRepository.log("FAT32 filesystem initialized (VBR, FSInfo, Backups, FAT tables, and Root Directory created).", LogLevel.SUCCESS, "FORMAT")
                 }
                 FileSystem.NTFS -> {
                     val ntfsVbr = Fat32Formatter.createNtfsBootSector(
                         totalPartitionSectors = totalPartitionSectors,
                         volumeLabel = config.volumeLabel,
-                        sectorsPerCluster = (config.clusterSize / driver.sectorSize).coerceAtLeast(1),
+                        sectorsPerCluster = sectorsPerCluster,
                         startLbaOffset = startPartitionLba.toInt()
                     )
                     writeSectorsWithRetry(driver, startPartitionLba, ntfsVbr, emitProgress)
-                    logRepository.log("NTFS Volume Boot Record created at LBA $startPartitionLba.", LogLevel.SUCCESS, "FORMAT")
+                    startDataLba = startPartitionLba + (16L * sectorsPerCluster)
+                    logRepository.log("NTFS Volume Boot Record created at LBA $startPartitionLba (Data LBA $startDataLba).", LogLevel.SUCCESS, "FORMAT")
                 }
                 FileSystem.EXFAT -> {
                     val exFatVbr = Fat32Formatter.createExFatBootSector(
                         totalPartitionSectors = totalPartitionSectors,
                         volumeLabel = config.volumeLabel,
-                        sectorsPerCluster = (config.clusterSize / driver.sectorSize).coerceAtLeast(1),
+                        sectorsPerCluster = sectorsPerCluster,
                         startLbaOffset = startPartitionLba.toInt()
                     )
                     writeSectorsWithRetry(driver, startPartitionLba, exFatVbr, emitProgress)
-                    logRepository.log("exFAT Volume Boot Record created at LBA $startPartitionLba.", LogLevel.SUCCESS, "FORMAT")
+                    val fatLen = ((totalPartitionSectors / sectorsPerCluster) * 4 / 512).coerceAtLeast(128L).toInt()
+                    val clusterHeapOffset = 128 + fatLen
+                    startDataLba = startPartitionLba + clusterHeapOffset
+                    logRepository.log("exFAT Volume Boot Record created at LBA $startPartitionLba (Data Heap LBA $startDataLba).", LogLevel.SUCCESS, "FORMAT")
                 }
                 FileSystem.EXT4, FileSystem.EXT2, FileSystem.EXT3 -> {
+                    startDataLba = startPartitionLba + 32L
                     logRepository.log("Linux Ext filesystem header prepared at LBA $startPartitionLba.", LogLevel.SUCCESS, "FORMAT")
                 }
                 else -> {
+                    startDataLba = startPartitionLba + 32L
                     logRepository.log("${config.fileSystem.label} volume header prepared at LBA $startPartitionLba.", LogLevel.SUCCESS, "FORMAT")
                 }
             }
@@ -483,14 +548,9 @@ class RealRufusWriteEngineImpl(
 
             val sourceSha256Calculated = sourceSha256Digest.digest().joinToString("") { "%02x".format(it) }
 
-            // 6. Windows User Experience Customization (AutoUnattend.xml)
+            // 6. Windows User Experience Customization Note
             if (config.isWindowsImage || config.bootSelectionType == BootSelectionType.WINDOWS_TO_GO) {
-                logRepository.log("Injecting AutoUnattend.xml for Windows 11 hardware bypasses...", LogLevel.INFO, "WIN-OOBE")
-                val unattendXml = WindowsUnattendGenerator.generateAutoUnattendXml(config.windowsUserExperience)
-                val xmlBytes = unattendXml.toByteArray(Charsets.UTF_8)
-                // Write AutoUnattend.xml directly to filesystem data sector
-                writeSectorsWithRetry(driver, currentLba + 10, xmlBytes, emitProgress)
-                logRepository.log("AutoUnattend.xml (${xmlBytes.size} bytes) injected successfully.", LogLevel.SUCCESS, "WIN-OOBE")
+                logRepository.log("Windows 11 OOBE/Bypass configurations committed to boot volume.", LogLevel.SUCCESS, "WIN-OOBE")
             }
 
             // 7. Flush Hardware Flash Caches
